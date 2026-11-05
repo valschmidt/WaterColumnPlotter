@@ -28,7 +28,7 @@ classifiers = [
 Homepage = "https://github.com/monsterkittykitty/WaterColumnPlotter"
 
 [project.gui-scripts]
-water_colum_plotter = "WaterColumnPlotter.GUI.GUI_Main:main"
+water_column_plotter = "WaterColumnPlotter.GUI.GUI_Main:main"
 
 [tool.setuptools.packages.find]
 include = ["WaterColumnPlotter*"]
