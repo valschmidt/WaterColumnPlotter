@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "WaterColumnPlotter"
+version = "0.0.1"
+description = "Package for real-time water column data visualization."
+authors = [{ name = "Lynette Davis", email = "ldavis@ccom.unh.edu" }]
+keywords = ["hydrography", "ocean mapping", "sonar", "hydrographic survey", "water column"]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=2.0",
+    "pykmall>=1.1.2",
+    "PyQt5>=5.15",
+    "pyqtgraph>=0.13",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+
+[project.urls]
+Homepage = "https://github.com/monsterkittykitty/WaterColumnPlotter"
+
+[project.gui-scripts]
+water_colum_plotter = "WaterColumnPlotter.GUI.GUI_Main:main"
+
+[tool.setuptools.packages.find]
+include = ["WaterColumnPlotter*"]
+
+[tool.setuptools.package-data]
+"WaterColumnPlotter.GUI.Settings" = ["*.json"]
+"WaterColumnPlotter.GUI.Dialogs.UIFiles" = ["*.ui"]
