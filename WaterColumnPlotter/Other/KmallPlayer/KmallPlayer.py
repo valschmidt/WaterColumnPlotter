@@ -19,7 +19,6 @@ import socket
 import struct
 import sys
 import threading
-import math
 from KMALL.kmall import kmall
 
 logger = logging.getLogger(__name__)
@@ -41,12 +40,14 @@ class KmallPlayer:
         self.connection = connection
 
         self.SOCKET_TIMEOUT = 60  # Seconds
+
+        # Maximum size of a UDP packet sent; larger 'M' datagrams are partitioned (as Kongsberg PUs do).
+        self.MAX_DATAGRAM_SIZE = 64000
+
         self.sock_out = self.__init_sockets()
 
         # Counter for number of sent datagrams:
         self.dg_counter = 0
-
-        self.MAX_DATAGRAM_SIZE = 64000
 
         # As of REV I (April 2021), it appears data fields contained in header, partition, and cmnPart
         # structs have not changed and are consistent across all revisions (REV B - REV I).
@@ -54,8 +55,6 @@ class KmallPlayer:
         self.HEADER_STRUCT_SIZE = struct.calcsize(self.HEADER_STRUCT_FORMAT)
         self.PARTITION_STRUCT_FORMAT = '2H'
         self.PARTITION_STRUCT_SIZE = struct.calcsize(self.PARTITION_STRUCT_FORMAT)
-        self.CMNPART_STRUCT_FORMAT = '2H8B'
-        self.CMNPART_STRUCT_SIZE = struct.calcsize(self.CMNPART_STRUCT_FORMAT)
 
         # All 'M' datagrams (MRZ, MWC) contain header and partition structs. As of REV I (April 2021), all 'M' datagrams
         # also contain cmnPart structs. Previous to REV I (REV B - REV H), only partition 1 contains cmnPart struct.
@@ -107,11 +106,13 @@ class KmallPlayer:
             # Set TTL to 1 to avoid forwarding beyond current network segment.
             ttl = struct.pack('b', 1)
             temp_sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
-            # Set socket send buffer to size of UDP packet
-            temp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2 ** 16)
         else:
             logger.warning("Connection type must be 'TCP', 'UDP', or 'Multicast'.")
             sys.exit(1)
+
+        # The send buffer must hold at least one full packet: sendto() fails with 'Message too long' for packets
+        # larger than it (on macOS the default is 9216 bytes). Allow room for a few packets.
+        temp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * self.MAX_DATAGRAM_SIZE)
 
         return temp_sock
 
@@ -170,91 +171,44 @@ class KmallPlayer:
         sched_play = [now + datetime.timedelta(seconds=(x + delay)) for x in df['ScheduledDelay']]
         df['ScheduledPlay'] = sched_play
 
-    @staticmethod
-    def read_header_raw(data) -> dict:
-        header = {}
-        format_to_unpack = "1I4s2B1H2I"
-        fields = struct.unpack(format_to_unpack, data[0:struct.calcsize(format_to_unpack)])
-        # Datagram length in bytes. The length field at the start (4 bytes) and end
-        # of the datagram (4 bytes) are included in the length count.
-        header['numBytesDgm'] = fields[0]
-        # Array of length 4. Multibeam datagram type definition, e.g. #AAA
-        header['dgmType'] = fields[1]
-        # Datagram version.
-        header['dgmVersion'] = fields[2]
-        # System ID. Parameter used for separating datagrams from different echosounders
-        # if more than one system is connected to SIS/K-Controller.
-        header['systemID'] = fields[3]
-        # Echo sounder identity, e.g. 122, 302, 710, 712, 2040, 2045, 850.
-        header['echoSounderID'] = fields[4]
-        # UTC time in seconds + Nano seconds remainder. Epoch 1970-01-01.
-        header['time_sec'] = fields[5]
-        header['time_nanosec'] = fields[6]
-        return header
-
-    @staticmethod
-    def update_header_with_dgm_size(header, new_size) -> bytes:
-        header['numBytesDgm'] = new_size
-        format_to_pack = "1I4s2B1H2I"
-        header_in_bytes = struct.pack(format_to_pack, header['numBytesDgm'], header['dgmType'],
-                                      header['dgmVersion'], header['systemID'],
-                                      header['echoSounderID'], header['time_sec'], header['time_nanosec'])
-        return header_in_bytes
-
     def partition_msg(self, msg_to_split: bytes) -> []:
-        message_size = len(msg_to_split)
-        if message_size <= self.MAX_DATAGRAM_SIZE:
-            # No partitionning needed
-            return msg_to_split
-        else:
-            # Header from original message
-            header_dict = self.read_header_raw(msg_to_split[:self.HEADER_STRUCT_SIZE])
+        """
+        Splits an 'M' datagram (#MRZ, #MWC) larger than self.MAX_DATAGRAM_SIZE into partitions, as a Kongsberg PU
+        does before sending over UDP. Each partition is: header (numBytesDgm = partition size), partition struct
+        (numOfDgms, dgmNum), [cmnPart, REV I+ only], a chunk of the data, and the partition size repeated in
+        the final 4 bytes. Before REV I, cmnPart is sent only once, at the start of the data in partition 1.
+        :param msg_to_split: A complete datagram as read from a .kmall / .kmwcd file.
+        :return: A list of partitions (bytes).
+        """
+        if len(msg_to_split) <= self.MAX_DATAGRAM_SIZE:
+            return [msg_to_split]
 
-            rev_i_plus = False
-            if header_dict['dgmType'] == b'#MRZ':
-                if header_dict['dgmVersion'] >= 3:
-                    rev_i_plus = True
-            if header_dict['dgmType'] == b'#MWC':
-                if header_dict['dgmVersion'] >= 2:
-                    rev_i_plus = True
+        dgm_type = msg_to_split[4:8]
+        dgm_version = msg_to_split[8]
+        # REV I (#MRZ version 3, #MWC version 2) repeats cmnPart in every partition.
+        rev_i_plus = (dgm_type == b'#MRZ' and dgm_version >= 3) or (dgm_type == b'#MWC' and dgm_version >= 2)
 
-            # size_appended_to_all is size of structs that must be included in every partition
-            if rev_i_plus:  # cmnPart should be included in all partitions
-                size_appended_to_all = self.HEADER_STRUCT_SIZE + self.PARTITION_STRUCT_SIZE + \
-                                       self.CMNPART_STRUCT_SIZE + 4
-            else:  # cmnPart should only be included in partition 1
-                size_appended_to_all = self.HEADER_STRUCT_SIZE + self.PARTITION_STRUCT_SIZE + 4
+        # Fields repeated at the start of every partition: header + partition [+ cmnPart].
+        lead_size = self.HEADER_STRUCT_SIZE + self.PARTITION_STRUCT_SIZE
+        if rev_i_plus:
+            # numBytesCmnPart is the first field of cmnPart.
+            lead_size += struct.unpack_from("H", msg_to_split, lead_size)[0]
+        lead = msg_to_split[:lead_size]
 
-            max_data_size = self.MAX_DATAGRAM_SIZE - size_appended_to_all
-            # Data to be split is only a subset of the datagram:
-            data_size = message_size - size_appended_to_all
-            # Each partition must have header and partition fields appended to it.
-            numOfDgms = math.ceil(data_size / float(max_data_size))
-            # Get the data content in the datagram and split it into smaller packs
-            data_to_split = msg_to_split[(size_appended_to_all - 4):-4]
+        data = msg_to_split[lead_size:-4]  # Everything between the leading fields and the final size field.
+        max_chunk_size = self.MAX_DATAGRAM_SIZE - lead_size - 4
+        chunks = [data[i:i + max_chunk_size] for i in range(0, len(data), max_chunk_size)]
 
-            messages = []
-            # Partitions created in this loop will all have the max packet size of 64000
-            for i in range(numOfDgms - 1):
-                header = self.update_header_with_dgm_size(header_dict, self.MAX_DATAGRAM_SIZE)
-                # Partition index changes
-                part_struct = struct.pack("2H", numOfDgms, i+1)
-                split = data_to_split[i*max_data_size:(i+1)*max_data_size]
+        messages = []
+        for dgm_num, chunk in enumerate(chunks, start=1):
+            m = bytearray(lead) + chunk + bytes(4)
+            size = len(m)
+            struct.pack_into("I", m, 0, size)  # numBytesDgm in header
+            struct.pack_into("2H", m, self.HEADER_STRUCT_SIZE, len(chunks), dgm_num)  # numOfDgms, dgmNum
+            struct.pack_into("I", m, size - 4, size)  # Repeated size at end of partition
+            messages.append(bytes(m))
 
-                # Header + partition + data + message size repeated
-                m = bytearray(header) + bytearray(part_struct) + bytearray(split) \
-                    + bytearray(struct.pack('I', max_data_size))
-                messages.append(m)
-
-            # Last partition  must contain the rest
-            rest_size = data_size % max_data_size
-            header = self.update_header_with_dgm_size(header_dict, rest_size + size_appended_to_all)
-            part_struct = struct.pack("2H", numOfDgms, numOfDgms)
-            split = data_to_split[(numOfDgms - 1) * max_data_size:]
-            m = header + part_struct + split + struct.pack('I', max_data_size)
-            messages.append(m)
-
-            return messages
+        return messages
 
     def send_all_datagrams(self, fp, df):
         """
@@ -345,7 +299,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument("path", help="Path to file or folder containing .kmall or .kmwcd file extensions.")
-    parser.add_argument("--replay_timing", default=None, help="Interval at which to send Kongsberg datagrams.")
+    parser.add_argument("--replay_timing", default=None, type=float, help="Interval at which to send Kongsberg datagrams.")
     parser.add_argument("tx_ip", help="IP address to send Kongsberg datagrams.")
     parser.add_argument("tx_port", help="Port to send Kongsberg datagrams.", type=int)
     parser.add_argument("--connection", default="Multicast", help="Connection type: TCP, UDP, or Multicast.",
