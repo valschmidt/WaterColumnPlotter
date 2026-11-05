@@ -20,7 +20,7 @@ import struct
 import sys
 import threading
 import math
-from WaterColumnPlotter.Other.KmallPlayer import KMALL
+from KMALL.kmall import kmall
 
 logger = logging.getLogger(__name__)
 
@@ -331,7 +331,7 @@ class KmallPlayer:
             # Index file (find offsets and sizes of each datagram):
             # Function index_file() creates a dataframe ("k.Index") containing fields for
             # "Time" (index), "ByteOffset","MessageSize", and "MessageType".
-            k = KMALL.kmall(file)
+            k = kmall(file)
             k.index_file()
 
             # Calculate scheduled delay and play time for each datagram:

@@ -10,7 +10,6 @@
 
 import cProfile
 import datetime
-import io
 import logging
 from multiprocessing import Process, Value
 from numba import jit
@@ -19,7 +18,8 @@ import numpy as np
 import struct
 import time
 import queue
-from WaterColumnPlotter.Kongsberg.KmallReaderForMDatagrams import KmallReaderForMDatagrams as k
+from KMALL.kmall import kmall
+from WaterColumnPlotter.Kongsberg.KongsbergDGCaptureFromSonar import HEADER_FORMAT, PARTITION_FORMAT
 from WaterColumnPlotter.Plotter.PieStandardFormat import PieStandardFormat
 
 __appname__ = "Water Column Process"
@@ -48,6 +48,9 @@ class KongsbergDGProcess(Process):
         self.max_grid_cells_local = None
         # Initialize above local copies
         self.update_local_settings()
+
+        # KMALL datagram reader; pointed at each queued datagram with OpenBytestoRead()
+        self.km = kmall()
 
         # Queue shared between DGCapture and DGProcess ('get' data from this queue)
         self.queue_datagram = queue_datagram
@@ -127,12 +130,12 @@ class KongsbergDGProcess(Process):
         Reads header of datagram and initiates processing of datagram based on datagram type.
         :param dg_bytes: Datagram as pulled from shared multiprocessing.Queue (bytes).
         """
-        bytes_io = io.BytesIO(dg_bytes)
-        header = k.read_EMdgmHeader(bytes_io)
+        self.km.OpenBytestoRead(dg_bytes)
+        header = self.km.read_EMdgmHeader()
 
         if header['dgmType'] == b'#MRZ':
             # self.mrz = dg_bytes
-            self.process_MRZ(header, bytes_io)
+            self.process_MRZ(header)
 
         elif header['dgmType'] == b'#MWC':
             # For debugging:
@@ -142,7 +145,7 @@ class KongsbergDGProcess(Process):
             # For debugging:
             # start = datetime.datetime.now()
 
-            pie_object = self.process_MWC(header, bytes_io)
+            pie_object = self.process_MWC(header)
             self.queue_pie_object.put(pie_object)
 
             # end = datetime.datetime.now()
@@ -150,30 +153,23 @@ class KongsbergDGProcess(Process):
 
         elif header['dgmType'] == b'#SKM':
             # self.skm = dg_bytes
-            self.process_SKM(header, bytes_io)
+            self.process_SKM(header)
 
-    def process_MRZ(self, header, bytes_io):
+    def process_MRZ(self, header):
         """
         Process #MRZ datagram; not currently implemented.
         :param header: Header field of #MRZ datagram.
-        :param bytes_io: #MRZ datagram as BytesIO object.
         :return: None
         """
         pass
 
-    def process_MWC(self, header, bytes_io):
+    def process_MWC(self, header):
         """
         Process #MWC datagram. Bins water column data, creates standard format pie records.
         :param header: Header field of #MWC datagram.
-        :param bytes_io: #MWC datagram as BytesIO object.
         :return: #MWC data as a PieStandardFormat object.
         """
-        header_struct_format = k.read_EMdgmHeader(None, return_format=True)
-        partition_struct_format = k.read_EMdgmMpartition(None, header['dgmType'],
-                                                         header['dgmVersion'], return_format=True)
-
-        length_to_strip = struct.calcsize(header_struct_format) + \
-                          struct.calcsize(partition_struct_format)
+        length_to_strip = struct.calcsize(HEADER_FORMAT) + struct.calcsize(PARTITION_FORMAT)
 
         pie_chart_amplitudes = np.zeros(shape=(self.max_grid_cells_local, self.max_grid_cells_local))
         pie_chart_counts = np.zeros(shape=(self.max_grid_cells_local, self.max_grid_cells_local))
@@ -185,13 +181,14 @@ class KongsbergDGProcess(Process):
 
             # Create an 'empty' PieStandardFormat record
             pie_object = PieStandardFormat(self.bin_size_local, self.max_heave_local,
-                                           pie_chart_amplitudes, pie_chart_counts, header['dgTime'])
+                                           pie_chart_amplitudes, pie_chart_counts, header['dgtime'])
 
             return pie_object
 
         # Full datagram (all partitions received):
         else:
-            dg = k.read_EMdgmMWC(bytes_io, return_numpy=True)
+            self.km.FID.seek(0, 0)
+            dg = self.km.read_EMdgmMWC()
 
             # TxInfo fields:
             heave = dg['txInfo']['heave_m']
@@ -243,7 +240,7 @@ class KongsbergDGProcess(Process):
 
                 # Create an 'empty' PieStandardFormat record
                 pie_object = PieStandardFormat(self.bin_size_local, self.max_heave_local,
-                                               pie_chart_amplitudes, pie_chart_counts, header['dgTime'])
+                                               pie_chart_amplitudes, pie_chart_counts, header['dgtime'])
                 return pie_object
 
             # Compute average for non-zero values:
@@ -391,56 +388,27 @@ class KongsbergDGProcess(Process):
             pie_chart_counts[tuple(y_z_indices)] += 1
 
             # This results in mirror-image pie display. Use flip!
-            # pie_object = PieStandardFormat(pie_chart_amplitudes, pie_chart_counts, dg['header']['dgTime'])
+            # pie_object = PieStandardFormat(pie_chart_amplitudes, pie_chart_counts, dg['header']['dgtime'])
             pie_object = PieStandardFormat(self.bin_size_local, self.max_heave_local,
                                            np.flip(pie_chart_amplitudes, axis=1),
-                                           np.flip(pie_chart_counts, axis=1), dg['header']['dgTime'])
+                                           np.flip(pie_chart_counts, axis=1), dg['header']['dgtime'])
 
         return pie_object
 
-    def process_SKM(self, header, bytes_io):
+    def process_SKM(self, header):
         """
         Process #SKM datagram; not currently implemented.
         :param header: Header field of #SKM datagram.
-        :param bytes_io: #SKM datagram as BytesIO object.
         :return: None
         """
         pass
 
-    def print_MWC(self, bytes_io):
+    def print_MWC(self):
         """
-        Prints full #MWC record as dictionary. For debugging.
-        :param bytes_io: #MWC datagram as BytesIO object.
+        Prints the #MWC record currently loaded in self.km. For debugging.
         """
-        print("Printing #MWC record:")
-        bytes_io.seek(0, 0)
-        header = k.read_EMdgmHeader(bytes_io, return_fields=True)
-        print("Header: ", header)
-        if header[1] == b'#MWC':
-            print("Header: ", header)
-            # print("At position {} of length {}".format(bytes_io.tell(), len(bytes)))
-            partition = k.read_EMdgmMpartition(bytes_io, header[1], header[2], return_fields=True)
-            print("Partition: ", partition)
-            # print("At position {} of length {}".format(bytes_io.tell(), len(bytes)))
-            cmn_part = k.read_EMdgmMbody(bytes_io, header[1], header[2], return_fields=True)
-            print("CmnPart: ", cmn_part)
-            # print("At position {} of length {}".format(bytes_io.tell(), len(bytes)))
-            tx_info = k.read_EMdgmMWC_txInfo(bytes_io, header[2], return_fields=True)
-            print("TxInfo: ", tx_info)
-            # print("At position {} of length {}".format(bytes_io.tell(), len(bytes)))
-            sectorData = []
-            for i in range(tx_info[1]):
-                sectorData.append(k.read_EMdgmMWC_txSectorData(bytes_io, header[2], return_fields=True))
-            print("SectorData: ", sectorData)
-            # print("At position {} of length {}".format(bytes_io.tell(), len(bytes)))
-            rx_info = k.read_EMdgmMWC_rxInfo(bytes_io, header[2], return_fields=True)
-            print("Rx Info: ", rx_info)
-            # print("At position {} of length {}".format(bytes_io.tell(), len(bytes)))
-            beamData = []
-            for i in range(rx_info[1]):
-                print("In DGProcess. i: ", i)
-                beamData.append(k.read_EMdgmMWC_rxBeamData(bytes_io, header[2], rx_info[3], return_fields=True))
-            print("Beam Data: ", beamData)
+        self.km.FID.seek(0, 0)
+        self.km.print_datagram(self.km.read_EMdgmMWC())
 
     def run(self):
         """

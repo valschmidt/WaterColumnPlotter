@@ -19,16 +19,21 @@ import argparse
 import cProfile
 import ctypes
 import datetime
-import io
 import logging
 from multiprocessing import Process
 import multiprocessing as mp
 import socket
 import struct
 import sys
-from WaterColumnPlotter.Kongsberg.KmallReaderForMDatagrams import KmallReaderForMDatagrams as k
+from KMALL.kmall import kmall
 
 __appname__ = "Water Column Capture"
+
+# Struct formats of the KMALL datagram header, M-datagram partition and M-datagram body (cmnPart);
+# used to splice partitioned UDP datagrams back into a single datagram.
+HEADER_FORMAT = "1I4s2B1H2I"
+PARTITION_FORMAT = "2H"
+CMNPART_FORMAT = "2H8B"
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +63,9 @@ class KongsbergDGCaptureFromSonar(Process):
         self.socket_buffer_multiplier_local = None
         # Initialize above local copies
         self.update_local_settings()
+
+        # KMALL datagram reader; pointed at each received UDP datagram with OpenBytestoRead()
+        self.km = kmall()
 
         # When run as main, out_file is required;
         # when run with multiprocessing, queue is required (multiprocessing.Queue)
@@ -181,7 +189,7 @@ class KongsbergDGCaptureFromSonar(Process):
         """
         buffer = {'dgmType': [None] * self.MAX_NUM_PINGS_TO_BUFFER,
                   'dgmVersion': [None] * self.MAX_NUM_PINGS_TO_BUFFER,
-                  'dgTime': [None] * self.MAX_NUM_PINGS_TO_BUFFER,
+                  'dgtime': [None] * self.MAX_NUM_PINGS_TO_BUFFER,
                   'pingCnt': [None] * self.MAX_NUM_PINGS_TO_BUFFER,
                   'numOfDgms': [None] * self.MAX_NUM_PINGS_TO_BUFFER,
                   'dgmsRxed': [0] * self.MAX_NUM_PINGS_TO_BUFFER,
@@ -284,9 +292,8 @@ class KongsbergDGCaptureFromSonar(Process):
                     logger.exception("Socket timeout exception.")
                     break
 
-                bytes_io = io.BytesIO(data)
-
-                header = k.read_EMdgmHeader(bytes_io)
+                self.km.OpenBytestoRead(data)
+                header = self.km.read_EMdgmHeader()
 
                 if header['dgmType'] in self.REQUIRED_DATAGRAMS:
                     if header['dgmType'] == b'#MRZ' or header['dgmType'] == b'#MWC':  # Datagrams may be partitioned
@@ -303,7 +310,7 @@ class KongsbergDGCaptureFromSonar(Process):
                         #         self.data_counter = 0
                         #     self.data_counter += header['numBytesDgm']
 
-                        partition = k.read_EMdgmMpartition(bytes_io, header['dgmType'], header['dgmVersion'])
+                        partition = self.km.read_EMdgmMpartition()
 
                         # For debugging:
                         # print("KongsbergDGCapture, number of partitions:", partition['numOfDgms'])
@@ -315,9 +322,9 @@ class KongsbergDGCaptureFromSonar(Process):
 
                         else:  # Greater than one datagram; needs to be reconstructed
                             # Check for timestamp in buffer:
-                            if header['dgTime'] in self.buffer['dgTime']:  # Timestamp in buffer
+                            if header['dgtime'] in self.buffer['dgtime']:  # Timestamp in buffer
 
-                                index = self.buffer['dgTime'].index(header['dgTime'])
+                                index = self.buffer['dgtime'].index(header['dgtime'])
 
                                 # Though not strictly necessary, adding an accurate ping count to each
                                 # record can help with debugging.
@@ -332,7 +339,7 @@ class KongsbergDGCaptureFromSonar(Process):
                                 # 'pingCnt' field of the buffer will be None.
                                 if self.buffer['pingCnt'][index] is None:
                                     if header['dgmVersion'] == 2 or partition['dgmNum'] == 1:
-                                        cmnPart = k.read_EMdgmMbody(bytes_io, header['dgmType'], header['dgmVersion'])
+                                        cmnPart = self.km.read_EMdgmMbody()
 
                                 # Append new data to existing data in buffer:
                                 self.buffer['dgmsRxed'][index] += 1
@@ -340,7 +347,7 @@ class KongsbergDGCaptureFromSonar(Process):
 
                                 # For debugging:
                                 # print("Inserting existing datagram {}, {} into index {}. Part {} of {}."
-                                #       .format(header['dgmType'], header['dgTime'], index,
+                                #       .format(header['dgmType'], header['dgtime'], index,
                                 #               partition['dgmNum'], partition['numOfDgms']))
                                 # print("datagrams rxed: ", self.buffer['dgmsRxed'][index])
                                 # print("Existing: self.buffer['dgmsRxed'][index]:", self.buffer['dgmsRxed'][index])
@@ -351,7 +358,7 @@ class KongsbergDGCaptureFromSonar(Process):
 
                                     # For debugging:
                                     # print("All data received: {}, {}, ping: ".format(self.buffer['dgmType'],
-                                    #                                                  self.buffer['dgTime'],
+                                    #                                                  self.buffer['dgtime'],
                                     #                                                  self.buffer['pingCnt']))
 
                                     self.buffer['complete'][index] = True
@@ -369,7 +376,7 @@ class KongsbergDGCaptureFromSonar(Process):
                                             self.buffer['data'][timestamp_index])
 
                                         # For debugging:
-                                        # print(datetime.datetime.utcfromtimestamp(self.buffer['dgTime'][timestamp_index]))
+                                        # print(datetime.datetime.utcfromtimestamp(self.buffer['dgtime'][timestamp_index]))
 
                                         self.queue_datagram.put(data_reconstruct)
                                         with self.full_ping_count.get_lock():
@@ -378,10 +385,10 @@ class KongsbergDGCaptureFromSonar(Process):
                                         # For debugging:
                                         # print("Complete datablock: {}, {}, {} bytes"
                                         #       .format(self.buffer['dgmType'][timestamp_index],
-                                        #               self.buffer['dgTime'][timestamp_index], data_size))
+                                        #               self.buffer['dgtime'][timestamp_index], data_size))
 
                                         # Clear entry; practically, we don't need to clear any more than this
-                                        self.buffer['dgTime'][timestamp_index] = None
+                                        self.buffer['dgtime'][timestamp_index] = None
                                         self.buffer['complete'][timestamp_index] = False
 
                                         # Advance timestamp_index to oldest timestamp in buffer
@@ -395,11 +402,11 @@ class KongsbergDGCaptureFromSonar(Process):
                             else:  # Timestamp not in buffer
 
                                 # For debugging:
-                                # print("Timestamp not in buffer: {}, {}".format(header['dgmType'], header['dgTime']))
+                                # print("Timestamp not in buffer: {}, {}".format(header['dgmType'], header['dgtime']))
 
                                 # Check whether next_index currently points to incomplete data.
                                 # If so, log and discard / overwrite data.
-                                if self.buffer['dgTime'][next_index] is not None:  # Index contains data
+                                if self.buffer['dgtime'][next_index] is not None:  # Index contains data
 
                                     if next_index == timestamp_index:  # This should always be True
                                         if self.buffer['complete'][next_index]:
@@ -410,14 +417,14 @@ class KongsbergDGCaptureFromSonar(Process):
                                                 self.buffer['data'][timestamp_index])
 
                                             # For debugging:
-                                            # print(datetime.datetime.utcfromtimestamp(self.buffer['dgTime'][timestamp_index]))
+                                            # print(datetime.datetime.utcfromtimestamp(self.buffer['dgtime'][timestamp_index]))
 
                                             self.queue_datagram.put(data_reconstruct)
                                             with self.full_ping_count.get_lock():
                                                 self.full_ping_count.value += 1
 
                                             # Clear entry; practically, we don't need to clear any more than this
-                                            self.buffer['dgTime'][timestamp_index] = None
+                                            self.buffer['dgtime'][timestamp_index] = None
                                             self.buffer['complete'][timestamp_index] = False
 
                                             # Advance timestamp_index to oldest timestamp in buffer
@@ -427,8 +434,8 @@ class KongsbergDGCaptureFromSonar(Process):
                                             # For debugging:
                                             # print("Overwriting data at index {}. This timestamp: {}. "
                                             #       "All timestamps: {}".format(next_index,
-                                            #                                   self.buffer['dgTime'][next_index],
-                                            #                                   self.buffer['dgTime']))
+                                            #                                   self.buffer['dgtime'][next_index],
+                                            #                                   self.buffer['dgtime']))
 
                                             empty_data_reconstruct, data_size = self.reconstruct_empty_data(
                                                 self.buffer['dgmType'][next_index],
@@ -442,7 +449,7 @@ class KongsbergDGCaptureFromSonar(Process):
                                             logger.warning("Data block incomplete. Discarding {}, {}. (Ping {}, {} of {} datagrams.) "
                                                            "\nConsidering increasing size of buffer. (Current buffer size: {}.)"
                                                            .format(self.buffer['dgmType'][next_index],
-                                                                   self.buffer['dgTime'][next_index],
+                                                                   self.buffer['dgtime'][next_index],
                                                                    self.buffer['pingCnt'][next_index],
                                                                    self.buffer['dgmsRxed'][next_index],
                                                                    self.buffer['numOfDgms'][next_index],
@@ -450,8 +457,8 @@ class KongsbergDGCaptureFromSonar(Process):
 
                                     # For debugging:
                                     # print("Next index: {}. Timestamp index and timestamp: {}, {}. All timestamps: {}"
-                                    #       .format(next_index, timestamp_index, self.buffer['dgTime'][timestamp_index],
-                                    #               self.buffer['dgTime']))
+                                    #       .format(next_index, timestamp_index, self.buffer['dgtime'][timestamp_index],
+                                    #               self.buffer['dgtime']))
 
                                     # Error checking: When overwriting data, next_index must equal timestamp_index or
                                     # something is wrong! This should never print. If it does, there's an error in code.
@@ -467,18 +474,18 @@ class KongsbergDGCaptureFromSonar(Process):
                                 # partitioned datagram in all partitions. (This change is reflected in version 2+
                                 # of the #MWC datagram.)
                                 if header['dgmVersion'] == 2 or partition['dgmNum'] == 1:
-                                    cmnPart = k.read_EMdgmMbody(bytes_io, header['dgmType'], header['dgmVersion'])
+                                    cmnPart = self.km.read_EMdgmMbody()
                                 else:
                                     cmnPart = None
 
                                 # For debugging:
                                 # print("Inserting new datagram {}, {} into index {}. Part {} of {}."
-                                #       .format(header['dgmType'], header['dgTime'], next_index,
+                                #       .format(header['dgmType'], header['dgtime'], next_index,
                                 #               partition['dgmNum'], partition['numOfDgms']))
 
                                 self.buffer['dgmType'][next_index] = header['dgmType']
                                 self.buffer['dgmVersion'][next_index] = header['dgmVersion']
-                                self.buffer['dgTime'][next_index] = header['dgTime']
+                                self.buffer['dgtime'][next_index] = header['dgtime']
                                 if cmnPart:
                                     self.buffer['pingCnt'][next_index] = cmnPart['pingCnt']
                                 else:
@@ -495,7 +502,7 @@ class KongsbergDGCaptureFromSonar(Process):
                                 # print("dgmVersion:", header['dgmVersion'])
                                 # print("numBytesCmnPart:", cmnPart['numBytesCmnPart'])
                                 # print("Inserting new datagram {}, {} into index {}. Part {} of {}."
-                                #       .format(header['dgmType'], header['dgTime'], next_index,
+                                #       .format(header['dgmType'], header['dgtime'], next_index,
                                 #               partition['dgmNum'], partition['numOfDgms']))
                                 # print("New: self.buffer['dgmsRxed'][index]:", self.buffer['dgmsRxed'][next_index])
                                 # print("New: self.buffer['numOfDgms'][index]:", self.buffer['numOfDgms'][next_index])
@@ -505,13 +512,13 @@ class KongsbergDGCaptureFromSonar(Process):
                                 # already be pointing to the earliest timestamp. This newly added datagram is the only
                                 # timestamp that could be earlier than those already existing in the buffer, and a newly
                                 # added datagram is certainly incomplete.
-                                timestamp_index = self.buffer['dgTime'] \
-                                    .index(min(time for time in self.buffer['dgTime'] if time is not None))
+                                timestamp_index = self.buffer['dgtime'] \
+                                    .index(min(time for time in self.buffer['dgtime'] if time is not None))
 
                                 # Advance next_index
                                 # If unused slots exits in self.buffer, select first unused slot
-                                if None in self.buffer['dgTime']:
-                                    next_index = self.buffer['dgTime'].index(None)
+                                if None in self.buffer['dgtime']:
+                                    next_index = self.buffer['dgtime'].index(None)
                                 # Otherwise, select position with oldest timestamp
                                 else:
                                     next_index = timestamp_index
@@ -544,16 +551,16 @@ class KongsbergDGCaptureFromSonar(Process):
         """
         Recursive method to flush all complete records from buffer after pause or stop command or socket timeout.
         """
-        # print("Flushing buffer. Timestamps: ", self.buffer['dgTime'])  # For debugging
+        # print("Flushing buffer. Timestamps: ", self.buffer['dgtime'])  # For debugging
         temp_index = 0
 
-        # If all items in self.buffer['dgTime'] are None:
-        if self.buffer['dgTime'] == [None] * len(self.buffer['dgTime']):
+        # If all items in self.buffer['dgtime'] are None:
+        if self.buffer['dgtime'] == [None] * len(self.buffer['dgtime']):
             return
         else:
             # Advance temp_index to oldest timestamp in buffer
-            temp_index = self.buffer['dgTime'] \
-                .index(min(time for time in self.buffer['dgTime'] if time is not None))
+            temp_index = self.buffer['dgtime'] \
+                .index(min(time for time in self.buffer['dgtime'] if time is not None))
 
             # When advancing index to existing entry, check if complete:
             if self.buffer['complete'][temp_index]:  # Data at temp_index is complete!
@@ -570,12 +577,12 @@ class KongsbergDGCaptureFromSonar(Process):
                 # For debugging:
                 # print("Flushing buffer; complete datablock: {}, {}, {} bytes"
                 #       .format(self.buffer['dgmType'][temp_index],
-                #               self.buffer['dgTime'][temp_index], data_size))
+                #               self.buffer['dgtime'][temp_index], data_size))
 
             # TODO: If data block is incomplete, this should reconstruct an empty record!
 
             # Whether or not data block is complete, clear entry:
-            self.buffer['dgTime'][temp_index] = None
+            self.buffer['dgtime'][temp_index] = None
             self.buffer['complete'][temp_index] = False
 
             # Advance timestamp again to continue flushing buffer
@@ -589,13 +596,13 @@ class KongsbergDGCaptureFromSonar(Process):
         If no active timestamps, return 0.
         """
 
-        # If all items in self.buffer['dgTime'] are None:
-        if self.buffer['dgTime'] == [None] * len(self.buffer['dgTime']):
+        # If all items in self.buffer['dgtime'] are None:
+        if self.buffer['dgtime'] == [None] * len(self.buffer['dgtime']):
             timestamp_index = 0
         else:
             # Advance timestamp_index to oldest timestamp in buffer
-            timestamp_index = self.buffer['dgTime'] \
-                .index(min(time for time in self.buffer['dgTime'] if time is not None))
+            timestamp_index = self.buffer['dgtime'] \
+                .index(min(time for time in self.buffer['dgtime'] if time is not None))
 
             # When advancing index to existing entry, check if complete:
             if self.buffer['complete'][timestamp_index]:  # Data at timestamp_index is complete!
@@ -612,10 +619,10 @@ class KongsbergDGCaptureFromSonar(Process):
                 # For debugging:
                 # print("Advancing timestamp; complete datablock: {}, {}, {} bytes"
                 #       .format(self.buffer['dgmType'][timestamp_index],
-                #               self.buffer['dgTime'][timestamp_index], data_size))
+                #               self.buffer['dgtime'][timestamp_index], data_size))
 
                 # Clear entry
-                self.buffer['dgTime'][timestamp_index] = None
+                self.buffer['dgtime'][timestamp_index] = None
                 self.buffer['complete'][timestamp_index] = False
 
                 # Advance timestamp again
@@ -636,12 +643,8 @@ class KongsbergDGCaptureFromSonar(Process):
         temp_buffer = []
         numBytesDgm = 0
 
-        header_struct_format = k.read_EMdgmHeader(None, return_format=True)
-        partition_struct_format = k.read_EMdgmMpartition(None, dgmType, dgmVersion, return_format=True)
-        # cmnPart_struct_format = k.read_EMdgmMbody(data, dgmType, dgmVersion, return_format=True)
-
-        length_to_strip = struct.calcsize(header_struct_format) + \
-                          struct.calcsize(partition_struct_format)
+        length_to_strip = struct.calcsize(HEADER_FORMAT) + \
+                          struct.calcsize(PARTITION_FORMAT)
 
         index = 0
         temp_datagram = data[index]
@@ -664,9 +667,9 @@ class KongsbergDGCaptureFromSonar(Process):
 
         # Adjust partition values
         partition_packed = struct.pack("2H", 1, 1)  # Returns type <class 'bytes'>
-        temp_buffer[0][struct.calcsize(header_struct_format):
-                       (struct.calcsize(header_struct_format) +
-                        struct.calcsize(partition_struct_format))] = partition_packed
+        temp_buffer[0][struct.calcsize(HEADER_FORMAT):
+                       (struct.calcsize(HEADER_FORMAT) +
+                        struct.calcsize(PARTITION_FORMAT))] = partition_packed
 
         # Flatten buffer
         flat_buffer = self.flatten_buffer(temp_buffer)
@@ -685,19 +688,15 @@ class KongsbergDGCaptureFromSonar(Process):
         temp_buffer = []
         numBytesDgm = 0
 
-        header_struct_format = k.read_EMdgmHeader(None, return_format=True)
-        partition_struct_format = k.read_EMdgmMpartition(None, dgmType, dgmVersion, return_format=True)
-        cmnPart_struct_format = k.read_EMdgmMbody(None, dgmType, dgmVersion, return_format=True)
-
         # Length to strip for Kongsberg *.kmall datagram format revisions A - H.
-        length_to_strip = struct.calcsize(header_struct_format) + struct.calcsize(partition_struct_format)
+        length_to_strip = struct.calcsize(HEADER_FORMAT) + struct.calcsize(PARTITION_FORMAT)
 
         # Determine Kongsberg *.kmall datagram format revision version.
         # Revision A - H contain cmnPart only in partition 1; revisions I+ contain cmnPart in all partitions.
         # Revision I updated #MRZ datagram to version 3 and #MWC datagram to version 2.
         if (dgmType == b'#MRZ' and dgmVersion >= 3) or (dgmType == b'#MWC' and dgmVersion >= 2):
             # Length to strip for Kongsberg *.kmall datagram format revisions I+.
-            length_to_strip += struct.calcsize(cmnPart_struct_format)
+            length_to_strip += struct.calcsize(CMNPART_FORMAT)
 
         for i in range(len(data)):
             if i == 0:  # First dgm must have last 4 bytes removed
@@ -716,9 +715,9 @@ class KongsbergDGCaptureFromSonar(Process):
 
         # Adjust partition values
         partition_packed = struct.pack("2H", 1, 1)  # Returns type <class 'bytes'>
-        temp_buffer[0][struct.calcsize(header_struct_format):
-                       (struct.calcsize(header_struct_format) +
-                        struct.calcsize(partition_struct_format))] = partition_packed
+        temp_buffer[0][struct.calcsize(HEADER_FORMAT):
+                       (struct.calcsize(HEADER_FORMAT) +
+                        struct.calcsize(PARTITION_FORMAT))] = partition_packed
 
         # Flatten buffer
         flat_buffer = self.flatten_buffer(temp_buffer)
