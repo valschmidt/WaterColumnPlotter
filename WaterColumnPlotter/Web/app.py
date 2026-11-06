@@ -35,13 +35,13 @@ DEFAULT_SETTINGS = {
     'acrossTrackAvg_m': 10.0,
     'sliceDepth_m': 10.0,
     'sliceThickness_m': 2.0,
-    'alongTrackAvg_ping': 5,
-    'historyPings': 2500,
+    'alongTrackAvg_swath': 10,
+    'historySwaths': 5000,
     'referenceToSurface': False,
     'transducerDepth_m': None,  # below the waterline; set from #IIP when one is received (None: not yet known)
     'heaveAllowance_m': 1.0,    # room shown above 0 m when depths are measured from the transducer
     'sidelobeSuppression': 'off',
-    'backgroundPings': 10,      # 'ping_mean' sidelobe suppression: pings averaged into each beam's background
+    'backgroundSwaths': 10,      # 'ping_mean' sidelobe suppression: earlier swaths of the same fan averaged into each beam's background
     'layerMinLevel_dB': 1.0,    # layer tracking: minimum level above the profile's background
     # Thermocline tracking (after Cordero Ros, 2018)
     'thermoclineThreshold_dBpm': 0.2,  # minimum high-passed level gradient for a pick
@@ -57,13 +57,13 @@ SETTING_LIMITS = {
     'acrossTrackAvg_m': (float, 0.01, 10000.0),
     'sliceDepth_m': (float, 0.0, 12000.0),
     'sliceThickness_m': (float, 0.01, 1000.0),
-    'alongTrackAvg_ping': (int, 1, 100),
-    'historyPings': (int, 10, 100000),
+    'alongTrackAvg_swath': (int, 1, 100),
+    'historySwaths': (int, 10, 100000),
     'referenceToSurface': (bool, False, True),
     'transducerDepth_m': (float, -100.0, 100.0),
     'heaveAllowance_m': (float, 0.0, 50.0),
     'sidelobeSuppression': ('choice', gridding.SIDELOBE_SUPPRESSION),
-    'backgroundPings': (int, 1, 100),
+    'backgroundSwaths': (int, 1, 100),
     'layerMinLevel_dB': (float, 0.1, 30.0),
     'thermoclineThreshold_dBpm': (float, 0.01, 50.0),
     'thermoclineWindow_s': (float, 0.0, 3600.0),
@@ -89,8 +89,8 @@ def validate_settings(current, requested):
 
 
 def history_columns(settings):
-    """Number of slice columns kept: each column averages alongTrackAvg_ping pings."""
-    return math.ceil(settings['historyPings'] / settings['alongTrackAvg_ping'])
+    """Number of slice columns kept: each column averages alongTrackAvg_swath swaths."""
+    return math.ceil(settings['historySwaths'] / settings['alongTrackAvg_swath'])
 
 
 def frame(header, *arrays):
@@ -348,8 +348,17 @@ class Server:
             p.terminate()
             p.join(timeout=2)
 
+    @staticmethod
+    @web.middleware
+    async def revalidate(request, handler):
+        """Have browsers check the page and its files for changes on every load, so an update is never stale."""
+        response = await handler(request)
+        if request.path == '/' or request.path.startswith('/static/'):
+            response.headers['Cache-Control'] = 'no-cache'
+        return response
+
     def make_app(self):
-        app = web.Application()
+        app = web.Application(middlewares=[self.revalidate])
         app.router.add_get('/', self.index)
         app.router.add_get('/ws', self.websocket)
         app.router.add_get('/browse', self.browse)

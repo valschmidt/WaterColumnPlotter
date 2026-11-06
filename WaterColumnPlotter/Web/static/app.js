@@ -588,12 +588,12 @@ function acrossBand() {
 
 function historyColumns() {
   const s = state.settings;
-  return s ? Math.ceil(s.historyPings / s.alongTrackAvg_ping) : 1000;
+  return s ? Math.ceil(s.historySwaths / s.alongTrackAvg_swath) : 1000;
 }
 
 function columnAt(x) {
-  // Column under world x (pings, newest = 0) on the slice panels; each column spans alongTrackAvg_ping pings.
-  const k = state.columns.length + Math.floor(x / state.settings.alongTrackAvg_ping);
+  // Column under world x (swaths, newest = 0) on the slice panels; each column spans alongTrackAvg_swath swaths.
+  const k = state.columns.length + Math.floor(x / state.settings.alongTrackAvg_swath);
   return state.columns[k];
 }
 
@@ -611,23 +611,23 @@ const panels = {
     },
   }),
   horizontal: new Panel('horizontal', {
-    xLabel: 'Pings (0 = newest)',
+    xLabel: 'Swaths (0 = newest)',
     yLabel: 'Across-track (m)   port ↑',
     pinRight: true,
     describe: (x, y) => {
       const c = columnAt(x);
-      return `${Math.round(-x)} pings ago${c ? ' (' + utc(c.t) + ' UTC)' : ''}, across ${y.toFixed(1)} m`;
+      return `${Math.round(-x)} swaths ago${c ? ' (' + utc(c.t) + ' UTC)' : ''}, across ${y.toFixed(1)} m`;
     },
     overlay: (ctx, panel) => { if (state.grid) band(ctx, panel, 'y', ...acrossBand(), SLICE_V_COLOR); },
   }),
   vertical: new Panel('vertical', {
-    xLabel: 'Pings (0 = newest)',
+    xLabel: 'Swaths (0 = newest)',
     yLabel: 'Depth below transducer (m)',
     pinTop: true,
     pinRight: true,
     describe: (x, y) => {
       const c = columnAt(x);
-      return `${Math.round(-x)} pings ago${c ? ' (' + utc(c.t) + ' UTC)' : ''}, depth ${y.toFixed(1)} m`;
+      return `${Math.round(-x)} swaths ago${c ? ' (' + utc(c.t) + ' UTC)' : ''}, depth ${y.toFixed(1)} m`;
     },
     overlay: (ctx, panel) => {
       if (state.grid) band(ctx, panel, 'y', ...depthBand(), SLICE_H_COLOR);
@@ -646,7 +646,7 @@ const LAYER_MIN_COLUMNS = 10;  // only draw layers seen in at least this many co
 
 // Outline each tracked layer: its top and bottom in every column it was found in.
 function drawLayers(ctx, panel) {
-  const cols = state.columns, N = cols.length, A = state.settings.alongTrackAvg_ping;
+  const cols = state.columns, N = cols.length, A = state.settings.alongTrackAvg_swath;
   const count = new Map();
   for (const c of cols) for (const [id] of c.layers) count.set(id, (count.get(id) || 0) + 1);
   ctx.lineWidth = 1.5;
@@ -684,7 +684,7 @@ function lastPick() {
 // The tracked thermocline bottom, one segment per column colored by the cast alert, and the depth the picks are
 // compared with (dashed): the picks just after the cast, or the cast's thermocline bottom.
 function drawThermocline(ctx, panel) {
-  const cols = state.columns, N = cols.length, A = state.settings.alongTrackAvg_ping, p = panel.plot;
+  const cols = state.columns, N = cols.length, A = state.settings.alongTrackAvg_swath, p = panel.plot;
   const last = lastPick();
   const ref = last && last[1] !== null ? last[1]
     : state.svp && state.svp.thermocline_m ? state.svp.thermocline_m[1] + svpShift() : null;
@@ -844,7 +844,7 @@ function updatePie() {
   panels.pie.setImage({ w: p.cols, h: p.rows, data: p.data, x0, x1, y0, y1, extent: { x0, x1, y0, y1 } });
 }
 
-// Build a slice image: rows are grid indices covering every column's data, columns are pings (oldest at left).
+// Build a slice image: rows are grid indices covering every column's data, columns are slice columns (oldest at left).
 // Returns null if no column has data.
 function sliceImage(cols, offKey, valKey) {
   let lo = Infinity, hi = -Infinity;
@@ -867,8 +867,8 @@ function updateSlices() {
   const s = state.settings, cols = state.columns, N = cols.length;
   if (!s || !N) { panels.vertical.setImage(null); panels.horizontal.setImage(null); return; }
   const b = s.binSize_m;
-  const x0 = -N * s.alongTrackAvg_ping;  // x is in pings, newest = 0
-  const span = -historyColumns() * s.alongTrackAvg_ping;  // auto-zoom shows the full history, filling from the right
+  const x0 = -N * s.alongTrackAvg_swath;  // x is in swaths, newest = 0
+  const span = -historyColumns() * s.alongTrackAvg_swath;  // auto-zoom shows the full history, filling from the right
 
   for (const [panel, offKey, valKey] of [[panels.vertical, 'vOff', 'v'], [panels.horizontal, 'hOff', 'h']]) {
     const im = sliceImage(cols, offKey, valKey);
@@ -1187,7 +1187,7 @@ function showStats(stats) {
   if (lastStats && lastStats.replaying === replaying && count >= lastStats.count) {
     rate = `${((count - lastStats.count) / ((now - lastStats.at) / 1000)).toFixed(1)} datagrams/s · `;
   }
-  // Pings skipped since the last update because the cell size is too small for the swath.
+  // Swaths skipped since the last update because the cell size is too small for the swath.
   const tooLarge = lastStats ? (stats.grid_too_large ?? 0) - lastStats.tooLarge : 0;
   if (!replaying) {
     // Whether real-time data is arriving, next to the source.
@@ -1198,9 +1198,14 @@ function showStats(stats) {
     if (stats.error) sourceEl.error.textContent = stats.error;
     else if (sourceEl.error.textContent.startsWith("Can't receive UDP")) sourceEl.error.textContent = '';
   }
+  // The sonar's ping rate, from the data's timestamps (the recorded rate when replaying).
+  if (stats.ping_rate_hz) {
+    const swaths = stats.swaths_per_ping > 1 ? ` × ${stats.swaths_per_ping} swaths` : '';
+    rate = `${stats.ping_rate_hz.toFixed(1)} pings/s${swaths} · ` + rate;
+  }
   lastStats = { at: now, count, replaying, tooLarge: stats.grid_too_large ?? 0 };
   statusEl.classList.toggle('error', tooLarge > 0);
-  statusEl.textContent = (tooLarge > 0 ? 'Cell size too small for this swath: pings are being skipped · ' : '') +
+  statusEl.textContent = (tooLarge > 0 ? 'Cell size too small for this swath: swaths are being skipped · ' : '') +
     rate + (replaying ? `replaying · processed ${count}`
       : `received ${count} · incomplete dropped ${stats.discarded ?? 0}`) +
     ` · processing ${(stats.process_ms ?? 0).toFixed(0)} ms/datagram` + (state.paused ? ' · paused' : '');

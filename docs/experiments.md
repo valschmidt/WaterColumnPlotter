@@ -20,25 +20,27 @@ tracking follows the one edge expected to mark the bottom of the thermocline, ti
 
 ### Sidelobe suppression
 
-Options, applied to each ping's samples before gridding (values become dB relative to the subtracted level):
+Options, applied to each swath's samples before gridding (values become dB relative to the subtracted level). The two
+median options use Kongsberg's transmit sectors and are in `Web/kongsberg.py`, since only multisector sonars need
+them; the medians themselves are in `Web/medians.py`.
 
-- **Subtract median**: at each range sample, subtract the median over all beams at that range. Removes the seafloor
-  echo received through sidelobes beyond the minimum slant range, and the overall level change with range.
-- **Subtract median per sector**: the same, but the median is taken, and subtracted, separately over each transmit
-  sector's beams, so level differences between sectors are removed too.
-- **Subtract range and beam medians**: first subtract each beam's median over ranges inside the minimum slant range
-  (where every beam sees only water), then the range median. Also evens out the beam pattern within sectors. Doing
-  the beam step second over-corrects beyond the minimum slant range (measured -7.8 dB there versus -2.7 dB in this
-  order).
-
+- **Subtract median per sector**: at each range sample, subtract the median over each transmit sector's beams at
+  that range. Removes the seafloor echo received through sidelobes beyond the minimum slant range, the level change
+  with range, and level differences between sectors.
+- **Subtract range and beam medians**: first subtract each beam's median, taken separately inside the minimum slant
+  range (water only) and beyond it (water plus the seafloor echo received through the sidelobes, far louder), then
+  the range median per sector. Also evens out the beam pattern within sectors, which the median per sector leaves as
+  bright stripes at the centre sector's edges (below). The beam step is split at the minimum slant range because
+  beyond it a beam's level has nothing to do with its level in the water.
 - **Subtract each beam's mean of recent pings**: from each beam's sample at each range, subtract that beam's mean at
-  that range over the previous N pings (Settings > Background pings, default 10), kept per receive fan. Removes
-  whatever is the same from ping to ping in a beam, so only changes remain (moving targets, plumes, bubbles). The first
-  ping after a reset has no background and is not shown.
+  that range over the previous N swaths in the same position (Settings > Background swaths, default 10), kept per
+  receive fan. Removes whatever is the same from ping to ping in a beam, so only changes remain (moving targets,
+  plumes, bubbles). The first ping after a reset has no background and is not shown.
 
-(Subtracting the mean was dropped: it suppressed about as well as the median but is pulled by strong targets.
-Subtracting the median per sector only beyond the first bottom return, adding back each sector's level there so values
-stayed absolute dB, was also tried and dropped.)
+Tried and dropped: subtracting the mean (suppressed about as well as the median but is pulled by strong targets);
+subtracting the median over all beams, not per sector (left the outer sectors 7.8 dB above the centre); range and
+beam medians over all beams, with the beam step inside the minimum slant range only (superseded by the version above);
+the median per sector only beyond the first bottom return, adding back each sector's level there.
 
 Measured on a REV I EM2040 .kmwcd (dual swath, 24 m depth), mean of 10 pings, levels relative to the centre beams at
 11-15 m depth, gridding time per datagram:
@@ -46,20 +48,48 @@ Measured on a REV I EM2040 .kmwcd (dual swath, 24 m depth), mean of 10 pings, le
 | Option | Outer sector (14-20 m across, 11-15 m deep) | Sidelobe region (16-21 m deep, 25-40 m across) | Gridding |
 | --- | --- | --- | --- |
 | Off | +14.9 dB | +41.4 dB | 15 ms |
-| Subtract median | +7.8 dB | +0.3 dB | 20 ms |
+| Subtract median (dropped) | +7.8 dB | +0.3 dB | 20 ms |
 | Subtract median per sector | +0.3 dB | -1.1 dB | 24 ms |
-| Subtract range and beam medians | -1.2 dB | -2.9 dB | 26 ms |
+| Range and beam medians over all beams (dropped) | -1.2 dB | -2.9 dB | 26 ms |
+| Subtract range and beam medians (per sector; measured before the beam step was split) | -0.8 dB | -2.2 dB | 29 ms |
 | Subtract each beam's mean of recent pings (10) | -0.2 dB | -0.2 dB | 21 ms |
 
 Measured over 20 datagrams after 40 (so the last option has 10 pings of history): the layer at 11-14 m stands 7.2 dB
-above the water at 3-6 m with suppression off, -1.6 dB with the median per sector, -0.8 dB with range and beam medians
+above the water at 3-6 m with suppression off, -1.6 dB with the median per sector, -0.8 dB with range and beam medians over all beams (-1.1 dB per sector)
 and +0.1 dB with each beam's mean of recent pings. That last removes the sidelobe echo and the sector differences most
-completely, but scattering layers too, since they barely change over 10 pings (2.5 s); the vertical slice is left as
+completely, but scattering layers too, since they barely change over 10 ping cycles (1.1 s); the vertical slice is left as
 noise and the trackers have nothing to follow. The minimum slant range arc remains, as heave moves it between pings.
+
+Centre sector edge stripes: in this file the centre sector spans +-47.6 degrees and the outer sectors start at
++-45.7 degrees (they overlap), at different frequencies (centre 320/350 kHz, outer 260/290 kHz for the two swaths).
+Inside the minimum slant range the centre sector's level rises about 5 dB from nadir to its edges (receive beams
+widening with steering explain about 1.7 dB of that at 47 degrees), while the outer sectors are flat to within 1 dB.
+A range median per sector removes one level per range, so the centre sector's edge beams stay about 4 dB above its
+median and show as bright stripes along the horizontal slice. Measured as the pie level at the edge (+-1 m about
+depth x tan 46.5 degrees) relative to the water either side, at 8 / 10 / 14 m depth:
+
+| Option | Edge stripe |
+| --- | --- |
+| Off | +0.2 / -0.3 / -0.2 dB |
+| Subtract median per sector | +0.9 / +1.4 / +1.2 dB |
+| Range and beam medians over all beams (dropped) | -0.5 / -0.6 / -0.2 dB |
+| Subtract range and beam medians (per sector, beam step before the split) | -0.3 / +0.1 / -0.0 dB |
+
+Centre sector beyond the minimum slant range (here 23.8 m, seafloor 23.7 m, so a thin wedge above the seafloor at
+15-43 degrees), level re the centre water at 11-15 m and the spread (standard deviation) of its mean across 2 degree
+angle bins, over 60 datagrams:
+
+| Option | Centre sector beyond the ring | Just inside the ring | Outer sectors beyond the ring | Spread across angle |
+| --- | --- | --- | --- | --- |
+| Off | +41.4 dB | +3.4 dB | +41.5 dB | 1.8 dB |
+| Subtract median per sector | -0.8 dB | +0.5 dB | -0.5 dB | 0.6 dB |
+| Range and beam medians over all beams (dropped) | +1.6 dB | -1.2 dB | -3.0 dB | 0.6 dB |
+| Range and beam medians per sector, beam step inside the ring only | -1.5 dB | -0.6 dB | -1.3 dB | 0.9 dB |
+| Subtract range and beam medians (per sector, beam step split at the ring) | -1.2 dB | -0.6 dB | -1.3 dB | 0.4 dB |
 
 The median uses a sort per range row (6 ms) instead of `np.nanmedian` (21 ms). Suppression also weakens horizontal
 layers, which are similar across beams at a given range: the thermocline edge below fell from about 0.35 to 0.2
-dB/m with range and beam medians, so the thermocline pick threshold was set to work with both.
+dB/m with range and beam medians (the earlier all-beam version), so the thermocline pick threshold was set to work with both.
 
 ### Layer tracking
 
@@ -71,7 +101,7 @@ non-overlapping ones are kept, and each joins the layer whose recent extent it o
 the original: the seafloor echo (first value 20 dB above the profile median) and the first metre below the transducer
 are excluded, and layers are not split at a maximum duration. Layers seen in fewer than 10 columns are not drawn.
 
-On the test file with sidelobe suppression off and a 1 dB threshold, 300 columns (1500 pings) gave three persistent
+On the test file with sidelobe suppression off and a 1 dB threshold, 300 columns (1500 ping cycles, 3000 swaths) gave three persistent
 layers: 10.1-13.6 m (279 columns), 19.5-20.7 m (66) and 1.7-3.8 m just below the transducer (296; possibly near-field
 or bubbles). The 10-14 m layer sits just below the SVP's velocline (about 8.3 m below the transducer), the relationship
 Jose Cordero Ros's MS thesis (UNH, 2018, "Improved Sound Speed Control Through Remotely Detecting Strong Changes in the
@@ -112,14 +142,14 @@ Changes from the thesis, from testing on the .kmwcd:
   of the first 10 picks after it; an older cast (this file's was taken 8.5 hours before the data) falls back to the
   absolute comparison.
 
-Results on the test file (24 m water, cast 1533 m/s at the surface to 1496 m/s below 13.5 m, 1138 columns of 5 pings,
+Results on the test file (24 m water, cast 1533 m/s at the surface to 1496 m/s below 13.5 m, 1138 columns of 5 ping cycles (10 swaths; measured before counts became swaths),
 threshold 0.2 dB/m, search +-6 m):
 
 | Run | Picks | Pick depth below transducer, median (p10-p90) | Error at 65 degrees (p10 / p50 / p90) |
 | --- | --- | --- | --- |
 | Suppression off, reference the cast's thermocline bottom (as recorded) | 97 % of columns | 14.4 m (12.8-14.6) | +0.22 / +0.30 / +0.36 m |
 | Suppression off, reference the first picks after the cast (cast time set to the data start) | 97 % | 14.4 m (12.8-14.6) | -0.04 / +0.04 / +0.10 m |
-| Range and beam medians, reference the cast's thermocline bottom | 100 % | 14.2 m (9.6-14.6) | +0.03 / +0.29 / +0.35 m |
+| Range and beam medians (earlier all-beam version), reference the cast's thermocline bottom | 100 % | 14.2 m (9.6-14.6) | +0.03 / +0.29 / +0.35 m |
 
 As a check of the ray tracing, a canonical profile like the thesis's (1511 to 1493.5 m/s between 30 and 42 m) gives
 0.04, 0.12, 0.24 and 0.40 m errors at 65 degrees in 80 m of water for 1, 3, 6 and 10 m shifts, the same scale as his

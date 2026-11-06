@@ -1,9 +1,11 @@
 """
 Worker: parses complete #MWC datagrams with pykmall, grids them, and produces display data:
-- the pie: average of the last alongTrackAvg_ping pings, cropped to its data;
+- the pie: average of the last alongTrackAvg_swath swaths, cropped to its data;
 - slice columns: vertical (per depth row) and horizontal (per across-track column) averages, averaged along track
-  in blocks of alongTrackAvg_ping pings. (A ping is identified by pingCnt; dual-swath systems send two #MWC
-  datagrams per ping.)
+  in blocks of alongTrackAvg_swath swaths.
+Counts are of swaths, not ping cycles: a dual-swath system transmits two swaths per ping cycle, in different
+directions, under one pingCnt. A swath is identified by (pingCnt, swathAlongPosition); its #MWC datagrams (one per
+receive head on dual-head systems) are summed together.
 Results are put on a queue once per update interval. A recorded file can be replayed in place of live data
 (see replay.py).
 
@@ -30,13 +32,16 @@ from WaterColumnPlotter.Web.thermocline import ThermoclineTracker, depth_error, 
 logger = logging.getLogger(__name__)
 
 # Settings whose change discards everything processed so far: the cell size and depth reference (which place data
-# in the grid), and the along-track averaging (which sets how many pings each slice column spans).
+# in the grid), and the along-track averaging (which sets how many swaths each slice column spans).
 # Thermocline tracking: a cast is compared with the picks that follow it if it arrived within this long of being
 # taken, using the median of this many picks as the reference.
 CAST_RECENT_S = 600.0
+# Ping rate: measured over this many recent ping cycles; restarted after a gap longer than this.
+PING_RATE_PINGS = 21
+MAX_PING_GAP_S = 5.0
 CALIBRATION_PICKS = 10
 
-RESET_SETTINGS = ('binSize_m', 'alongTrackAvg_ping', 'referenceToSurface', 'transducerDepth_m', 'sidelobeSuppression')
+RESET_SETTINGS = ('binSize_m', 'alongTrackAvg_swath', 'referenceToSurface', 'transducerDepth_m', 'sidelobeSuppression')
 
 
 def band_sum(sums, counts, offset, band, axis):
@@ -58,15 +63,33 @@ class Worker:
         self.settings = dict(settings)
         self.km = kmall()
         self.svp = None  # latest cast: {'depth', 'speed', 'top', 'bottom'} (depths below the surface)
-        self.stats = {'processed': 0, 'no_bottom': 0, 'grid_too_large': 0, 'process_ms': 0.0}
+        self.stats = {'processed': 0, 'no_bottom': 0, 'grid_too_large': 0, 'process_ms': 0.0,
+                      'ping_rate_hz': None, 'swaths_per_ping': None}
+        self.ping_times = collections.deque(maxlen=PING_RATE_PINGS)  # (pingCnt, time) of recent ping cycles
         self.reset()
+
+    def note_ping(self, dg):
+        """
+        Track the sonar's ping rate from the data's timestamps (the recorded rate when replaying, whatever the speed).
+        Each ping cycle (pingCnt) counts once, however many swaths and receive heads it has.
+        """
+        ping, t = dg['cmnPart']['pingCnt'], dg['header']['dgtime']
+        last = self.ping_times[-1] if self.ping_times else None
+        if last and last[0] == ping:
+            return
+        if last and not 0 < t - last[1] < MAX_PING_GAP_S:
+            self.ping_times.clear()  # a gap, a seek or a new source
+        self.ping_times.append((ping, t))
+        span = self.ping_times[-1][1] - self.ping_times[0][1]
+        self.stats['ping_rate_hz'] = (len(self.ping_times) - 1) / span if span > 0 else None
+        self.stats['swaths_per_ping'] = dg['cmnPart']['swathsPerPing']
 
     def reset(self):
         s = self.settings
-        # Gridded blocks of the most recent pings, for the pie: [pingCnt, block]. Swaths of the same ping
-        # (dual-swath systems send one #MWC per swath) are summed into one entry.
-        self.recent = collections.deque(maxlen=s['alongTrackAvg_ping'])
-        # Slice column being accumulated: {'pings': set of pingCnt, 'v': block, 'h': block, 'times': []}
+        # Gridded blocks of the most recent swaths, for the pie: [(pingCnt, swathAlongPosition), block]. Datagrams of
+        # the same swath (one per receive head on dual-head systems) are summed into one entry.
+        self.recent = collections.deque(maxlen=s['alongTrackAvg_swath'])
+        # Slice column being accumulated: {'swaths': set of swath keys, 'v': block, 'h': block, 'times': []}
         self.column = None
         # Completed slice columns since the last update: (time, (v_off, v), (h_off, h), layers, thermocline)
         self.new_columns = []
@@ -75,7 +98,7 @@ class Worker:
                                               along_track_s=s['thermoclineWindow_s'])
         self.v_band = vertical_band(s)
         self.h_band = horizontal_band(s)
-        self.background = PingBackground(s['backgroundPings'])  # for 'ping_mean' sidelobe suppression
+        self.background = PingBackground(s['backgroundSwaths'])  # for 'ping_mean' sidelobe suppression
 
     def apply_settings(self, new):
         """Returns True if everything processed so far was discarded (so displays must clear their history)."""
@@ -89,7 +112,7 @@ class Worker:
             self.tracker.min_level_db = new['layerMinLevel_dB']
             self.thermocline.threshold = new['thermoclineThreshold_dBpm']
             self.thermocline.along_track_s = new['thermoclineWindow_s']
-            self.background.n = new['backgroundPings']
+            self.background.n = new['backgroundSwaths']
         return reset
 
     def finish_column(self):
@@ -172,6 +195,7 @@ class Worker:
         t0 = time.perf_counter()
         self.km.OpenBytestoRead(data)
         dg = self.km.read_EMdgmMWC()
+        self.note_ping(dg)
         s = self.settings
         depth_offset = (s['transducerDepth_m'] or 0.0) if s['referenceToSurface'] else 0.0
         try:
@@ -188,24 +212,24 @@ class Worker:
         in_band = (bottom[0] >= self.v_band[0] * b) & (bottom[0] < self.v_band[1] * b)
         seafloor = float(bottom[1][in_band].min()) if in_band.any() else None
         block = ((row0, col0), sums, counts)
-        ping = dg['cmnPart']['pingCnt']
+        swath = (dg['cmnPart']['pingCnt'], dg['cmnPart']['swathAlongPosition'])
 
-        if self.recent and self.recent[-1][0] == ping:
+        if self.recent and self.recent[-1][0] == swath:
             self.recent[-1][1] = add_blocks(self.recent[-1][1], block)
         else:
-            self.recent.append([ping, block])
+            self.recent.append([swath, block])
 
-        # Each slice column averages alongTrackAvg_ping whole pings.
-        if self.column is not None and ping not in self.column['pings'] \
-                and len(self.column['pings']) >= s['alongTrackAvg_ping']:
+        # Each slice column averages alongTrackAvg_swath swaths (an odd number splits a dual-swath ping cycle).
+        if self.column is not None and swath not in self.column['swaths'] \
+                and len(self.column['swaths']) >= s['alongTrackAvg_swath']:
             self.finish_column()
         v = band_sum(sums, counts, (row0, col0), self.v_band, axis=1)  # per row, over the across-track band
         h = band_sum(sums, counts, (row0, col0), self.h_band, axis=0)  # per column, over the depth band
         if self.column is None:
-            self.column = {'pings': {ping}, 'v': v, 'h': h, 'times': [dg['header']['dgtime']], 'seafloor': [seafloor]}
+            self.column = {'swaths': {swath}, 'v': v, 'h': h, 'times': [dg['header']['dgtime']], 'seafloor': [seafloor]}
         else:
             c = self.column
-            c['pings'].add(ping)
+            c['swaths'].add(swath)
             c['v'] = add_blocks(c['v'], v)
             c['h'] = add_blocks(c['h'], h)
             c['times'].append(dg['header']['dgtime'])
@@ -215,7 +239,7 @@ class Worker:
         self.stats['process_ms'] = 0.9 * self.stats['process_ms'] + 0.1 * 1e3 * (time.perf_counter() - t0)
 
     def pie(self):
-        """Average of the recent pings, cropped to cells with data: (data, row0, col0) or None."""
+        """Average of the recent swaths, cropped to cells with data: (data, row0, col0) or None."""
         if not self.recent:
             return None
         (row0, col0), sums, counts = functools.reduce(add_blocks, (r[1] for r in self.recent))

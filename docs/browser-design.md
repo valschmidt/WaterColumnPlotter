@@ -77,25 +77,32 @@ Gridding follows the Qt version's geometry, with two bugs fixed.
     visible. Referenced to the water surface, they start at 0 m.
   - Safeguard: a ping whose block would exceed 2 million cells (a cell size far too small for the swath) is skipped,
     and the page's status line says so.
+- Status line: the sonar's ping rate and swaths per ping, measured from the datagram timestamps over the last 20 ping
+  cycles (so a replay shows the recorded rate at any speed), then datagrams received (or processed, when replaying)
+  per second, and processing time per datagram. A ping cycle sends one datagram per swath per receive head, so dual-swath
+  data from one head gives two datagrams per ping cycle.
 - Amplitude is `sampleAmplitude05dB_p * 0.5 - TVGoffset_dB`. Each cell holds the sum and count of the samples in
   it, so averages are sum / count.
 - **Fixed:** the Qt version accumulated with `grid[idx] += amp`, which NumPy applies once per cell even when
   indices repeat. The cell therefore held a single sample, not the sum and count. We use `np.bincount`.
 - **Fixed:** beams with fewer samples than the bottom-detect range were padded with NaN, and the NaNs were added
   into the grid, erasing those cells. We only use samples that exist.
-- **Pie**: average of the last `alongTrackAvg_ping` pings.
+- **Pie**: average of the last `alongTrackAvg_swath` swaths.
 - **Vertical slice column**: per depth row, average over the across-track band `|y| <= acrossTrackAvg_m / 2`.
 - **Horizontal slice column**: per across-track column, average over the depth band
   `sliceDepth_m ± sliceThickness_m / 2`.
-- Slice columns are averaged along track in blocks of `alongTrackAvg_ping` pings. (The Qt version used blocks of
-  datagrams, so with dual-swath data a column spanned half as many pings as the setting said.)
+- Slice columns are averaged along track in blocks of `alongTrackAvg_swath` swaths. Counts throughout (along-track
+  average, swath history, background swaths) are of swaths, not ping cycles: a dual-swath system transmits two swaths
+  per ping cycle, pointing in different directions, under one `pingCnt`. A swath is `(pingCnt, swathAlongPosition)`;
+  an odd count is allowed and splits a ping cycle. (The Qt version counted datagrams, which is the same for
+  single-head systems but counts each receive head separately on dual-head ones.)
 
 ## Settings
 
 | Kind | Settings | Scope |
 | --- | --- | --- |
 | Network | UDP address, port, multicast group, HTTP port | Command-line arguments |
-| Processing | cell size, reference to water surface, heave allowance, slice depth, slice thickness, across-track width, along-track average, ping history | Server: shared by all viewers |
+| Processing | cell size, reference to water surface, heave allowance, slice depth, slice thickness, across-track width, along-track average, swath history | Server: shared by all viewers |
 | Display | zoom, pan, auto-zoom, color scale, pause | Browser: per viewer |
 
 Changing a processing setting applies to everyone, and every connected page shows the new value. Changing the cell size,
@@ -103,7 +110,7 @@ depth reference, transducer depth (from #IIP) or the along-track average clears 
 
 The settings form groups settings by the plot they affect (pie grid, horizontal slice, vertical slice, all plots),
 with explanations in tooltips. Names in the form versus the settings keys: cell size = `binSize_m`,
-ping history = `historyPings`.
+swath history = `historySwaths`.
 
 Possible later change: keep each datagram's grid (cropped to its data, roughly 0.3 MB) so slices can be recomputed
 for the whole history, or cut per viewer.

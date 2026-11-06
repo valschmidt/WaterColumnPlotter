@@ -16,6 +16,8 @@ import itertools
 
 import numpy as np
 
+from WaterColumnPlotter.Web import kongsberg
+
 # Largest block one datagram may be gridded into. A cell size that is very small for the swath would otherwise use
 # a great deal of memory.
 MAX_CELLS = 2_000_000
@@ -25,54 +27,19 @@ class GridTooLarge(Exception):
     pass
 
 
-# Sidelobe suppression choices: subtract, at each range sample, the median of all beams' values at that range;
-# 'median_sector' takes the median separately over each transmit sector's beams; 'median_beam' first subtracts each
-# beam's median (inside the minimum slant range), which evens out differences between transmit sectors and across
-# the beam pattern. 'ping_mean' instead subtracts, from each beam's sample at each range, that beam's mean at that
-# range over the previous pings (see PingBackground): whatever stays put from ping to ping.
-SIDELOBE_SUPPRESSION = ('off', 'median', 'median_sector', 'median_beam', 'ping_mean')
-
-
-def sorted_median(values, row, col, counts):
-    """Median of values per row, where (row, col) places each value in a table and counts is values per row."""
-    table = np.full((len(counts), int(col.max()) + 1), np.inf, dtype=np.float32)
-    table[row, col] = values
-    table.sort(axis=1)  # missing entries (inf) sort to the end of each row
-    lo, hi, r = np.maximum((counts - 1) // 2, 0), np.maximum(counts // 2, 0), np.arange(len(counts))
-    return (table[r, lo] + table[r, hi]) / 2
-
-
-def per_beam_median(values, beam_index, sample_number, max_sample):
-    """For every sample, its beam's median over samples before max_sample (inside the minimum slant range)."""
-    use = sample_number < max_sample
-    nbeams = int(beam_index.max()) + 1
-    counts = np.bincount(beam_index[use], minlength=nbeams)
-    if not counts.any():
-        return np.zeros_like(values)
-    med = sorted_median(values[use], beam_index[use], sample_number[use] - sample_number[use].min(), counts)
-    return np.where(counts > 0, med, 0.0)[beam_index]
-
-
-def across_beam_median(values, beam_index, sample_number, group=None):
-    """
-    For every sample, the median (dB) of all beams' samples at the same range sample number, or, if group (an integer
-    per sample, such as the transmit sector) is given, of the beams in the same group. Subtracting it suppresses
-    features that are the same across beams at a given range, such as the seafloor echo received through the
-    sidelobes beyond the minimum slant range.
-    """
-    s = sample_number - sample_number.min()
-    n = int(s.max()) + 1
-    row = s if group is None else (group - group.min()) * n + s  # one table row per (group,) range sample
-    counts = np.bincount(row, minlength=int(row.max()) + 1)
-    return sorted_median(values, row, beam_index, counts)[row]
+# Sidelobe suppression choices: the median options use Kongsberg's transmit sectors and are in kongsberg.py.
+# 'ping_mean' subtracts, from each beam's sample at each range, that beam's mean at that range over the previous
+# swaths (see PingBackground): whatever stays put from swath to swath.
+SIDELOBE_SUPPRESSION = ('off',) + kongsberg.OPTIONS + ('ping_mean',)
 
 
 class PingBackground:
     """
-    Each beam's mean level (dB) at each range sample over the previous n pings, kept separately for each receive fan
-    (dual-swath systems send two fans per ping, with different beams). Subtracting it from a ping removes what is the
-    same from ping to ping in each beam: the seafloor echo received through the sidelobes beyond the minimum slant
-    range, near-field ringing, steady interference, and also layers that don't change over n pings.
+    Each beam's mean level (dB) at each range sample over the previous n swaths of the same receive fan (a dual-swath
+    system's two swaths per ping cycle point in different directions, so each keeps its own background). Subtracting
+    it removes what is the same from swath to swath in each beam: the seafloor echo received through the sidelobes
+    beyond the minimum slant range, near-field ringing, steady interference, and also layers that don't change over n
+    swaths.
     """
 
     def __init__(self, n):
@@ -118,10 +85,8 @@ def grid_mwc(dg, bin_size, depth_offset=0.0, sidelobe_suppression='off', backgro
     """
     Grid one #MWC datagram (as returned by pykmall's kmall.read_EMdgmMWC()). depth_offset (m) is added to every
     depth: the transducer's depth below the waterline, to reference depths to the water surface.
-    sidelobe_suppression: 'off', or 'median' / 'median_sector' to subtract the median across beams (or across each
-    transmit sector's beams) at each range sample
-    (values are then dB relative to it); 'median_beam' first subtracts each beam's median; 'ping_mean' subtracts each
-    beam's mean over the previous pings, from background (a PingBackground), which this ping is then added to.
+    sidelobe_suppression: 'off'; one of kongsberg.OPTIONS, medians subtracted using the transmit sectors (values are
+    then dB relative to them); or 'ping_mean', which subtracts each beam's mean over the previous swaths, from background (a PingBackground), which this ping is then added to.
     :return: (sums, counts, row0, col0, bottom): 2D arrays of summed amplitude (dB) and sample count per cell, the
     row and column index of their first cell, and the bottom detections as (across-track, depth) arrays (m) for the
     beams that have one. Returns None if the ping has no bottom detections, or with 'ping_mean', for the first ping.
@@ -152,22 +117,16 @@ def grid_mwc(dg, bin_size, depth_offset=0.0, sidelobe_suppression='off', backgro
     first = np.repeat(np.cumsum(n_use) - n_use, n_use)
     sample_number = np.arange(total) - first + start[beam_index]
 
-    if sidelobe_suppression == 'median_beam':
-        # First even out the beams: subtract each beam's median inside the minimum slant range (the shortest bottom
-        # detection), where every beam sees only water. (Doing this after the range median over-corrects beyond
-        # the minimum slant range.)
-        amplitudes = amplitudes - per_beam_median(amplitudes, beam_index, sample_number, int(det.min()))
-    if sidelobe_suppression == 'ping_mean':
+    if sidelobe_suppression in kongsberg.OPTIONS:
+        amplitudes = kongsberg.suppress_sidelobes(dg, sidelobe_suppression, amplitudes, beam_index, sample_number,
+                                                  int(det.min()))
+    elif sidelobe_suppression == 'ping_mean':
         # Samples with no history yet are left out, rather than shown on a different (absolute dB) scale.
         key = (dg['cmnPart']['rxTransducerInd'], dg['cmnPart']['rxFanIndex'])
         amplitudes, has_background = background.subtract(key, beam_index, sample_number, amplitudes)
         if not has_background.any():
             return None
         beam_index, sample_number = beam_index[has_background], sample_number[has_background]
-    elif sidelobe_suppression != 'off':
-        sector = np.asarray(beam['beamTxSectorNum'], dtype=np.int64)[beam_index] \
-            if sidelobe_suppression == 'median_sector' else None
-        amplitudes = amplitudes - across_beam_median(amplitudes, beam_index, sample_number, sector)
 
     rx = dg['rxInfo']
     sample_range = sample_number.astype(np.float32) * np.float32(rx['soundVelocity_mPerSec'] / (2.0 * rx['sampleFreq_Hz']))
