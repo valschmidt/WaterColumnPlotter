@@ -14,7 +14,6 @@
       <span class="app-title">Water Column Plotter</span>
     </span>
     <button id="pause" type="button">Pause</button>
-    <label class="check" title="Fit the plots to the data as it arrives. Zooming or panning by hand turns this off; double-click a plot to turn it back on."><input type="checkbox" id="autozoom" checked> Auto-zoom</label>
     <label class="check" title="Faint grid lines at the axis ticks."><input type="checkbox" id="grid" checked> Grid</label>
     <label title="Experimental features tracked in the vertical slice. Layers (after Roland Arsenault's watercolumn_layer_tracker): every scattering layer standing out from the background, any number, outlined top and bottom with a color per layer. Thermocline (after Jose Cordero Ros's MS thesis): one line, the bottom of the scattering layer that marks the bottom of the thermocline, green or red by the outer-beam depth error from using the last cast.">Tracking
       <select id="tracking">
@@ -121,13 +120,15 @@
       <fieldset>
         <legend title="Each sample is placed in a grid of square cells, the same size across-track and in depth. The grid grows to cover the data.">Pie grid</legend>
         <label title="Size of the square grid cells, across-track and in depth: the resolution of all three plots.">Cell size <span class="unit">m</span><input name="binSize_m" type="number" step="any" min="0.01"></label>
-        <label title="Subtract, at each range, the median of all beams at that range. Suppresses the seafloor echo received through sidelobes beyond the minimum slant range; values become dB relative to that level. “Per sector” takes the median separately over each transmit sector's beams, evening out level differences between sectors. “Range and beam medians” first subtracts each beam's median, evening out sectors and the beam pattern. Applies immediately, for everyone.">Sidelobe suppression
+        <label title="Subtract, at each range, the median of all beams at that range. Suppresses the seafloor echo received through sidelobes beyond the minimum slant range; values become dB relative to that level. “Per sector” takes the median separately over each transmit sector's beams, evening out level differences between sectors. “Range and beam medians” first subtracts each beam's median, evening out sectors and the beam pattern. “Each beam's mean of recent pings” subtracts, from every beam at every range, that beam's mean there over the last few pings (Background pings): whatever stays the same from ping to ping, including layers that don't move. Applies immediately, for everyone.">Sidelobe suppression
           <select name="sidelobeSuppression">
             <option value="off">Off</option>
             <option value="median">Subtract median</option>
             <option value="median_sector">Subtract median per sector</option>
             <option value="median_beam">Subtract range and beam medians</option>
+            <option value="ping_mean">Subtract each beam's mean of recent pings</option>
           </select></label>
+        <label title="“Subtract each beam's mean of recent pings”: how many previous pings are averaged into each beam's background at each range. Fewer adapt faster; more suppress more steadily but also remove layers that change slowly.">Background pings<input name="backgroundPings" type="number" step="1" min="1" max="100"></label>
       </fieldset>
       <fieldset>
         <legend title="Depths are heave-corrected and measured from the transducer, or from the water surface.">Depth</legend>
@@ -166,6 +167,7 @@
     <section class="panel" id="pie">
       <div class="panel-head">
         <h2>Pie</h2>
+        <button class="autozoom" type="button" aria-pressed="true" title="Fit this plot to the data as it arrives. Zooming (wheel) or panning (drag) turns it off; click here or double-click the plot to turn it back on.">Auto-zoom</button>
         <span class="readout"></span>
         <span class="levels">
           <input class="lo" type="number" step="any" aria-label="Color scale minimum (dB)"> to
@@ -177,6 +179,7 @@
     <section class="panel" id="horizontal">
       <div class="panel-head">
         <h2>Horizontal slice</h2>
+        <button class="autozoom" type="button" aria-pressed="true" title="Fit this plot to the data as it arrives. Zooming (wheel) or panning (drag) turns it off; click here or double-click the plot to turn it back on.">Auto-zoom</button>
         <span class="readout"></span>
         <span class="levels">
           <input class="lo" type="number" step="any" aria-label="Color scale minimum (dB)"> to
@@ -188,6 +191,7 @@
     <section class="panel" id="vertical">
       <div class="panel-head">
         <h2>Vertical slice</h2>
+        <button class="autozoom" type="button" aria-pressed="true" title="Fit this plot to the data as it arrives. Zooming (wheel) or panning (drag) turns it off; click here or double-click the plot to turn it back on.">Auto-zoom</button>
         <span class="readout"></span>
         <span class="levels">
           <input class="lo" type="number" step="any" aria-label="Color scale minimum (dB)"> to

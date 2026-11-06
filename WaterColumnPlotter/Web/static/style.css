@@ -139,6 +139,7 @@ input[type="number"] {
   overflow: hidden;
 }
 .panel-head h2 { font-size: 13px; margin: 0; }
+.panel-head .autozoom { padding: 1px 8px; font-size: 12px; }
 .readout { flex: 1; color: var(--muted); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; }
 .levels { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
 .levels input { width: 58px; }

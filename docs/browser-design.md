@@ -120,10 +120,11 @@ for the whole history, or cut per viewer.
 - Each panel has a histogram of its values beside a color bar, with draggable minimum and maximum lines (drag the band
   between them to move both). The histogram's value range is fixed when data first arrives, so it doesn't shift with
   each update; it widens only if a level is set outside it. Double-clicking the histogram resets its range and levels.
-- Plots auto-zoom to the data extent by default. An "Auto-zoom" checkbox keeps them fitted as data arrives; manual
-  zoom (wheel) or pan (drag) turns it off.
-- Pie and vertical slice: the top stays fixed at every zoom level: 0 m (water surface) when referenced to the
-  surface, otherwise the heave allowance above 0 m.
+- Each plot has an "Auto-zoom" button in its header (on by default) that keeps it fitted to the data as it arrives;
+  zooming (wheel) or panning (drag) that plot turns it off, and the button or a double-click turns it back on. Zoom
+  and pan are free in both directions.
+- Pie and vertical slice: when fitted, the top is 0 m (water surface) when referenced to the surface, otherwise the
+  heave allowance above 0 m.
 - Horizontal and vertical slices: with auto-zoom on, the x-axis spans the full history and the newest ping stays at
   the right edge, so new data scrolls in from the right at a constant scale.
 - The horizontal slice's depth band and the vertical slice's across-track band are drawn on the pie.

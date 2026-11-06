@@ -31,6 +31,11 @@ Options, applied to each ping's samples before gridding (values become dB relati
   the beam step second over-corrects beyond the minimum slant range (measured -7.8 dB there versus -2.7 dB in this
   order).
 
+- **Subtract each beam's mean of recent pings**: from each beam's sample at each range, subtract that beam's mean at
+  that range over the previous N pings (Settings > Background pings, default 10), kept per receive fan. Removes
+  whatever is the same from ping to ping in a beam, so only changes remain (moving targets, plumes, bubbles). The first
+  ping after a reset has no background and is not shown.
+
 (Subtracting the mean was dropped: it suppressed about as well as the median but is pulled by strong targets.
 Subtracting the median per sector only beyond the first bottom return, adding back each sector's level there so values
 stayed absolute dB, was also tried and dropped.)
@@ -44,6 +49,13 @@ Measured on a REV I EM2040 .kmwcd (dual swath, 24 m depth), mean of 10 pings, le
 | Subtract median | +7.8 dB | +0.3 dB | 20 ms |
 | Subtract median per sector | +0.3 dB | -1.1 dB | 24 ms |
 | Subtract range and beam medians | -1.2 dB | -2.9 dB | 26 ms |
+| Subtract each beam's mean of recent pings (10) | -0.2 dB | -0.2 dB | 21 ms |
+
+Measured over 20 datagrams after 40 (so the last option has 10 pings of history): the layer at 11-14 m stands 7.2 dB
+above the water at 3-6 m with suppression off, -1.6 dB with the median per sector, -0.8 dB with range and beam medians
+and +0.1 dB with each beam's mean of recent pings. That last removes the sidelobe echo and the sector differences most
+completely, but scattering layers too, since they barely change over 10 pings (2.5 s); the vertical slice is left as
+noise and the trackers have nothing to follow. The minimum slant range arc remains, as heave moves it between pings.
 
 The median uses a sort per range row (6 ms) instead of `np.nanmedian` (21 ms). Suppression also weakens horizontal
 layers, which are similar across beams at a given range: the thermocline edge below fell from about 0.35 to 0.2

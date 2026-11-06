@@ -41,6 +41,7 @@ DEFAULT_SETTINGS = {
     'transducerDepth_m': None,  # below the waterline; set from #IIP when one is received (None: not yet known)
     'heaveAllowance_m': 1.0,    # room shown above 0 m when depths are measured from the transducer
     'sidelobeSuppression': 'off',
+    'backgroundPings': 10,      # 'ping_mean' sidelobe suppression: pings averaged into each beam's background
     'layerMinLevel_dB': 1.0,    # layer tracking: minimum level above the profile's background
     # Thermocline tracking (after Cordero Ros, 2018)
     'thermoclineThreshold_dBpm': 0.2,  # minimum high-passed level gradient for a pick
@@ -62,6 +63,7 @@ SETTING_LIMITS = {
     'transducerDepth_m': (float, -100.0, 100.0),
     'heaveAllowance_m': (float, 0.0, 50.0),
     'sidelobeSuppression': ('choice', gridding.SIDELOBE_SUPPRESSION),
+    'backgroundPings': (int, 1, 100),
     'layerMinLevel_dB': (float, 0.1, 30.0),
     'thermoclineThreshold_dBpm': (float, 0.01, 50.0),
     'thermoclineWindow_s': (float, 0.0, 3600.0),

@@ -11,6 +11,7 @@ Each ping is gridded into a block just large enough for its samples, given with 
 column, so no grid size has to be chosen and no samples are dropped.
 """
 
+import collections
 import itertools
 
 import numpy as np
@@ -27,8 +28,9 @@ class GridTooLarge(Exception):
 # Sidelobe suppression choices: subtract, at each range sample, the median of all beams' values at that range;
 # 'median_sector' takes the median separately over each transmit sector's beams; 'median_beam' first subtracts each
 # beam's median (inside the minimum slant range), which evens out differences between transmit sectors and across
-# the beam pattern.
-SIDELOBE_SUPPRESSION = ('off', 'median', 'median_sector', 'median_beam')
+# the beam pattern. 'ping_mean' instead subtracts, from each beam's sample at each range, that beam's mean at that
+# range over the previous pings (see PingBackground): whatever stays put from ping to ping.
+SIDELOBE_SUPPRESSION = ('off', 'median', 'median_sector', 'median_beam', 'ping_mean')
 
 
 def sorted_median(values, row, col, counts):
@@ -65,16 +67,64 @@ def across_beam_median(values, beam_index, sample_number, group=None):
     return sorted_median(values, row, beam_index, counts)[row]
 
 
-def grid_mwc(dg, bin_size, depth_offset=0.0, sidelobe_suppression='off'):
+class PingBackground:
+    """
+    Each beam's mean level (dB) at each range sample over the previous n pings, kept separately for each receive fan
+    (dual-swath systems send two fans per ping, with different beams). Subtracting it from a ping removes what is the
+    same from ping to ping in each beam: the seafloor echo received through the sidelobes beyond the minimum slant
+    range, near-field ringing, steady interference, and also layers that don't change over n pings.
+    """
+
+    def __init__(self, n):
+        self.n = n
+        self.fans = {}  # key -> {'history': deque of (beams x samples) float16 arrays, 'sum', 'count'}
+
+    def subtract(self, key, beam_index, sample_number, amplitudes):
+        """
+        Returns (amplitudes less the background, mask of the samples that had a background), and adds this ping to
+        the background. Samples with no history (the first ping, or ranges not reached before) have no background.
+        """
+        nbeams, nsamples = int(beam_index.max()) + 1, int(sample_number.max()) + 1
+        ping = np.full((nbeams, nsamples), np.nan, dtype=np.float32)
+        ping[beam_index, sample_number] = amplitudes
+        fan = self.fans.get(key)
+        if fan is None or fan['sum'].shape[0] != nbeams:  # new fan, or the beams changed
+            fan = self.fans[key] = {'history': collections.deque(), 'sum': np.zeros((nbeams, nsamples)),
+                                    'count': np.zeros((nbeams, nsamples), dtype=np.int32)}
+        if fan['sum'].shape[1] < nsamples:  # longer ranges than before
+            grow = ((0, 0), (0, nsamples - fan['sum'].shape[1]))
+            fan['sum'], fan['count'] = np.pad(fan['sum'], grow), np.pad(fan['count'], grow)
+
+        count = fan['count'][beam_index, sample_number]
+        has_background = count > 0
+        with np.errstate(invalid='ignore', divide='ignore'):
+            background = fan['sum'][beam_index, sample_number] / count
+        out = (amplitudes - background)[has_background].astype(np.float32)
+
+        # This ping joins the background; pings beyond the last n leave it.
+        ok = np.isfinite(ping)
+        fan['sum'][:, :nsamples] += np.where(ok, ping, 0.0)
+        fan['count'][:, :nsamples] += ok
+        fan['history'].append(ping.astype(np.float16))
+        while len(fan['history']) > self.n:
+            old = fan['history'].popleft().astype(np.float32)
+            ok = np.isfinite(old)
+            fan['sum'][:, :old.shape[1]] -= np.where(ok, old, 0.0)
+            fan['count'][:, :old.shape[1]] -= ok
+        return out, has_background
+
+
+def grid_mwc(dg, bin_size, depth_offset=0.0, sidelobe_suppression='off', background=None):
     """
     Grid one #MWC datagram (as returned by pykmall's kmall.read_EMdgmMWC()). depth_offset (m) is added to every
     depth: the transducer's depth below the waterline, to reference depths to the water surface.
     sidelobe_suppression: 'off', or 'median' / 'median_sector' to subtract the median across beams (or across each
     transmit sector's beams) at each range sample
-    (values are then dB relative to it); 'median_beam' first subtracts each beam's median.
+    (values are then dB relative to it); 'median_beam' first subtracts each beam's median; 'ping_mean' subtracts each
+    beam's mean over the previous pings, from background (a PingBackground), which this ping is then added to.
     :return: (sums, counts, row0, col0, bottom): 2D arrays of summed amplitude (dB) and sample count per cell, the
     row and column index of their first cell, and the bottom detections as (across-track, depth) arrays (m) for the
-    beams that have one. Returns None if the ping has no bottom detections.
+    beams that have one. Returns None if the ping has no bottom detections, or with 'ping_mean', for the first ping.
     :raises GridTooLarge: if the block would exceed MAX_CELLS cells.
     """
     beam = dg['beamData']
@@ -107,7 +157,14 @@ def grid_mwc(dg, bin_size, depth_offset=0.0, sidelobe_suppression='off'):
         # detection), where every beam sees only water. (Doing this after the range median over-corrects beyond
         # the minimum slant range.)
         amplitudes = amplitudes - per_beam_median(amplitudes, beam_index, sample_number, int(det.min()))
-    if sidelobe_suppression != 'off':
+    if sidelobe_suppression == 'ping_mean':
+        # Samples with no history yet are left out, rather than shown on a different (absolute dB) scale.
+        key = (dg['cmnPart']['rxTransducerInd'], dg['cmnPart']['rxFanIndex'])
+        amplitudes, has_background = background.subtract(key, beam_index, sample_number, amplitudes)
+        if not has_background.any():
+            return None
+        beam_index, sample_number = beam_index[has_background], sample_number[has_background]
+    elif sidelobe_suppression != 'off':
         sector = np.asarray(beam['beamTxSectorNum'], dtype=np.int64)[beam_index] \
             if sidelobe_suppression == 'median_sector' else None
         amplitudes = amplitudes - across_beam_median(amplitudes, beam_index, sample_number, sector)

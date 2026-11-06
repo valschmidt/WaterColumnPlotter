@@ -53,7 +53,6 @@ const state = {
   pie: null,           // {data, rows, cols, row0, col0}
   columns: [],         // [{t, vOff, v, hOff, h, layers: [[id, top, bottom]]}], oldest first; offsets are grid indices
   paused: false,
-  autoZoom: true,
   autoLevels: true,
   showGrid: true,
   tracking: 'thermocline',  // tracked features drawn on the vertical slice: 'off', 'layers' or 'thermocline'
@@ -144,7 +143,7 @@ class Panel {
     this.readout = this.el.querySelector('.readout');
     this.loInput = this.el.querySelector('.lo');
     this.hiInput = this.el.querySelector('.hi');
-    Object.assign(this, opts);  // xLabel, yLabel, pinTop, pinRight, equalAspect, describe, overlay
+    Object.assign(this, opts);  // xLabel, yLabel, pinTop, pinRight (used by fit), equalAspect, describe, overlay
     this.sideW = this.side ? SIDE_W + 12 : 0;  // optional strip right of the plot (the SVP on the vertical slice)
     this.margin = { l: 58, r: 12 + this.sideW + HIST.w + HIST.gap + HIST.barW + 8, t: 8, b: 34 };
     this.hist = null;       // histogram of the image values, for the level editor
@@ -154,6 +153,9 @@ class Panel {
     this.bitmap = document.createElement('canvas');
     this.levels = null;     // [lo, hi] dB
     this.view = null;       // {x0, x1, y0, y1} world coordinates shown
+    this.autoZoom = true;   // keep the view fitted to the data as it arrives
+    this.autoZoomButton = this.el.querySelector('.autozoom');
+    this.autoZoomButton.addEventListener('click', () => this.setAutoZoom(!this.autoZoom));
 
     new ResizeObserver(() => this.resize()).observe(this.canvas);
     this.loInput.addEventListener('change', () => this.setLevels([+this.loInput.value, this.levels[1]], true, true));
@@ -168,8 +170,15 @@ class Panel {
     this.canvas.width = Math.round(this.width * dpr);
     this.canvas.height = Math.round(this.height * dpr);
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (state.autoZoom) this.fit();
+    if (this.autoZoom) this.fit();
     this.draw();
+  }
+
+  setAutoZoom(on) {
+    if (this.autoZoom === on) return;
+    this.autoZoom = on;
+    this.autoZoomButton.setAttribute('aria-pressed', String(on));
+    if (on) { this.fit(); this.draw(); }
   }
 
   get plot() {
@@ -195,7 +204,7 @@ class Panel {
     if (!this.levels) this.autoLevels(false);
     else if (state.autoLevels && !this.histDrag) this.autoLevels(false, true);
     this.colorize();
-    if (state.autoZoom || !this.view) this.fit();
+    if (this.autoZoom || !this.view) this.fit();
     this.draw();
   }
 
@@ -249,7 +258,7 @@ class Panel {
     bctx.putImageData(img, 0, 0);
   }
 
-  // Fit the view to the data, honouring the panel's constraints.
+  // Fit the view to the data: from the top depth down on the pie and vertical slice, newest ping at the right edge.
   fit() {
     if (!this.image || !this.width) return;
     const e = this.image.extent;
@@ -269,27 +278,20 @@ class Panel {
     this.view = v;
   }
 
-  constrain(v) {
-    if (this.pinTop) { const dy = v.y1 - v.y0; v.y0 = topDepth(); v.y1 = v.y0 + dy; }
-    if (this.pinRight && state.autoZoom) { const dx = v.x1 - v.x0; v.x1 = 0; v.x0 = -dx; }
-    return v;
-  }
-
   bindMouse() {
     const c = this.canvas;
     c.addEventListener('wheel', ev => {
       if (!this.view) return;
       ev.preventDefault();
       if (this.inHist(ev.offsetX, ev.offsetY)) return;
-      setAutoZoom(false);
+      this.setAutoZoom(false);
       const f = Math.exp(ev.deltaY * 0.0015);
-      const [cx, cy0] = this.toWorld(ev.offsetX, ev.offsetY);
-      const cy = this.pinTop ? topDepth() : cy0;
+      const [cx, cy] = this.toWorld(ev.offsetX, ev.offsetY);
       const v = this.view;
-      this.view = this.constrain({
+      this.view = {
         x0: cx + (v.x0 - cx) * f, x1: cx + (v.x1 - cx) * f,
         y0: cy + (v.y0 - cy) * f, y1: cy + (v.y1 - cy) * f,
-      });
+      };
       this.draw();
     }, { passive: false });
 
@@ -306,9 +308,9 @@ class Panel {
       if (drag) {
         const p = this.plot, v = drag.view;
         const dx = (ev.offsetX - drag.x) / p.w * (v.x1 - v.x0);
-        const dy = this.pinTop ? 0 : (ev.offsetY - drag.y) / p.h * (v.y1 - v.y0);
-        if (dx || dy) setAutoZoom(false);
-        this.view = this.constrain({ x0: v.x0 - dx, x1: v.x1 - dx, y0: v.y0 - dy, y1: v.y1 - dy });
+        const dy = (ev.offsetY - drag.y) / p.h * (v.y1 - v.y0);
+        if (dx || dy) this.setAutoZoom(false);
+        this.view = { x0: v.x0 - dx, x1: v.x1 - dx, y0: v.y0 - dy, y1: v.y1 - dy };
         this.draw();
       }
       this.updateReadout(ev.offsetX, ev.offsetY);
@@ -325,7 +327,7 @@ class Panel {
         if (this.histRangeFixed) this.hist = histogram(this.image.data, this.histRangeFixed);
         this.autoLevels();
       } else {
-        setAutoZoom(true);
+        this.setAutoZoom(true);
       }
     });
   }
@@ -899,15 +901,6 @@ function resetData() {
 // ---------------------------------------------------------------------------
 // Controls
 // ---------------------------------------------------------------------------
-const autoZoomBox = document.getElementById('autozoom');
-function setAutoZoom(on) {
-  if (state.autoZoom === on) return;
-  state.autoZoom = on;
-  autoZoomBox.checked = on;
-  if (on) for (const p of Object.values(panels)) { p.fit(); p.draw(); }
-}
-autoZoomBox.addEventListener('change', () => setAutoZoom(autoZoomBox.checked));
-
 const pauseButton = document.getElementById('pause');
 pauseButton.addEventListener('click', () => {
   state.paused = !state.paused;
@@ -1251,11 +1244,7 @@ function handleText(msg) {
     showSettings();
     panels.pie.yLabel = panels.vertical.yLabel = depthLabel();
     // The top depth may have changed (heave allowance, depth reference).
-    for (const p of [panels.pie, panels.vertical]) {
-      if (!p.view) continue;
-      if (state.autoZoom) p.fit();
-      else p.view = p.constrain({ ...p.view });
-    }
+    for (const p of [panels.pie, panels.vertical]) if (p.view && p.autoZoom) p.fit();
     if (state.columns.length > historyColumns()) state.columns.splice(0, state.columns.length - historyColumns());
     for (const p of Object.values(panels)) p.draw();
   } else if (msg.type === 'reset') {

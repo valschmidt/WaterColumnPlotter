@@ -21,8 +21,8 @@ import time
 import numpy as np
 from KMALL.kmall import kmall
 
-from WaterColumnPlotter.Web.gridding import (GridTooLarge, add_blocks, average, grid_mwc, horizontal_band,
-                                             vertical_band)
+from WaterColumnPlotter.Web.gridding import (GridTooLarge, PingBackground, add_blocks, average, grid_mwc,
+                                             horizontal_band, vertical_band)
 from WaterColumnPlotter.Web.layers import LayerTracker
 from WaterColumnPlotter.Web.replay import Replay
 from WaterColumnPlotter.Web.thermocline import ThermoclineTracker, depth_error, svp_thermocline
@@ -75,6 +75,7 @@ class Worker:
                                               along_track_s=s['thermoclineWindow_s'])
         self.v_band = vertical_band(s)
         self.h_band = horizontal_band(s)
+        self.background = PingBackground(s['backgroundPings'])  # for 'ping_mean' sidelobe suppression
 
     def apply_settings(self, new):
         """Returns True if everything processed so far was discarded (so displays must clear their history)."""
@@ -88,6 +89,7 @@ class Worker:
             self.tracker.min_level_db = new['layerMinLevel_dB']
             self.thermocline.threshold = new['thermoclineThreshold_dBpm']
             self.thermocline.along_track_s = new['thermoclineWindow_s']
+            self.background.n = new['backgroundPings']
         return reset
 
     def finish_column(self):
@@ -173,7 +175,7 @@ class Worker:
         s = self.settings
         depth_offset = (s['transducerDepth_m'] or 0.0) if s['referenceToSurface'] else 0.0
         try:
-            result = grid_mwc(dg, s['binSize_m'], depth_offset, s['sidelobeSuppression'])
+            result = grid_mwc(dg, s['binSize_m'], depth_offset, s['sidelobeSuppression'], self.background)
         except GridTooLarge:
             self.stats['grid_too_large'] += 1
             return
