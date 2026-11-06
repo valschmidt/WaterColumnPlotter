@@ -12,6 +12,14 @@
     <span class="app-title">Water Column Plotter</span>
     <button id="pause" type="button">Pause</button>
     <label class="check" title="Fit the plots to the data as it arrives. Zooming or panning by hand turns this off; double-click a plot to turn it back on."><input type="checkbox" id="autozoom" checked> Auto-zoom</label>
+    <label class="check" title="Faint grid lines at the axis ticks."><input type="checkbox" id="grid" checked> Grid</label>
+    <label class="check" title="Experimental: outline scattering layers tracked in the vertical slice."><input type="checkbox" id="layers" checked> Layers</label>
+    <label title="Colour map for all plots.">Colours
+      <select id="colormap">
+        <option value="viridis">Viridis</option>
+        <option value="jet">Jet</option>
+        <option value="grayscale">Grayscale</option>
+      </select></label>
     <label class="check" title="Keep each plot's colour scale at the 10th to 90th percentile of its data. Adjusting a scale by hand turns this off."><input type="checkbox" id="autolevels" checked> Auto levels</label>
     <button id="settings-toggle" type="button" aria-expanded="false" aria-controls="settings">Settings</button>
     <span id="status" class="status">Connecting…</span>
@@ -22,6 +30,13 @@
       <fieldset>
         <legend title="Each sample is placed in a grid of square cells, the same size across-track and in depth. The grid grows to cover the data.">Pie grid</legend>
         <label title="Size of the square grid cells, across-track and in depth: the resolution of all three plots.">Cell size <span class="unit">m</span><input name="binSize_m" type="number" step="any" min="0.01"></label>
+        <label title="Subtract, at each range, the mean or median of all beams at that range. Suppresses the seafloor echo received through sidelobes beyond the minimum slant range; values become dB relative to that level. "Range and beam medians" also subtracts each beam's median, evening out transmit sectors and the beam pattern. Applies immediately, for everyone.">Sidelobe suppression
+          <select name="sidelobeSuppression">
+            <option value="off">Off</option>
+            <option value="mean">Subtract mean</option>
+            <option value="median">Subtract median</option>
+            <option value="median_beam">Subtract range and beam medians</option>
+          </select></label>
       </fieldset>
       <fieldset>
         <legend title="Depths are heave-corrected and measured from the transducer, or from the water surface.">Depth</legend>
@@ -36,6 +51,7 @@
       <fieldset>
         <legend title="A depth profile over time (cyan band on the pie)."><span class="swatch v"></span>Vertical slice</legend>
         <label title="Width of the band, centred under the vessel, averaged into each column.">Across-track width <span class="unit">m</span><input name="acrossTrackAvg_m" type="number" step="any" min="0.01"></label>
+        <label title="Experimental layer tracking: minimum level above the profile's background for a layer. Applies to new data.">Layer threshold <span class="unit">dB</span><input name="layerMinLevel_dB" type="number" step="any" min="0.1"></label>
       </fieldset>
       <fieldset>
         <legend>All plots</legend>

@@ -1,9 +1,18 @@
 'use strict';
 
 // ---------------------------------------------------------------------------
-// Colour map: viridis (polynomial fit), 256-entry lookup table.
+// Colour maps: 256-entry RGB lookup tables. LUT is the one in use.
 // ---------------------------------------------------------------------------
-const LUT = (() => {
+function makeLUT(rgb) {
+  const lut = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const c = rgb(i / 255);
+    for (let k = 0; k < 3; k++) lut[i * 3 + k] = Math.round(Math.max(0, Math.min(1, c[k])) * 255);
+  }
+  return lut;
+}
+
+const VIRIDIS = (() => {
   const c = [
     [0.2777273272234177, 0.005407344544966578, 0.3340998053353061],
     [0.1050930431085774, 1.404613529898575, 1.384590162594685],
@@ -25,6 +34,13 @@ const LUT = (() => {
   return lut;
 })();
 
+const LUTS = {
+  viridis: VIRIDIS,
+  jet: makeLUT(t => [1.5 - Math.abs(4 * t - 3), 1.5 - Math.abs(4 * t - 2), 1.5 - Math.abs(4 * t - 1)]),
+  grayscale: makeLUT(t => [t, t, t]),
+};
+let LUT = LUTS.viridis;
+
 const SLICE_H_COLOR = 'rgba(255, 92, 220, 0.9)';   // horizontal slice band (depth)
 const SLICE_V_COLOR = 'rgba(80, 220, 255, 0.9)';   // vertical slice band (across-track)
 
@@ -35,10 +51,13 @@ const state = {
   settings: null,
   grid: null,          // slice bands as grid indices: {vertical: [c0, c1] columns, horizontal: [r0, r1] rows}
   pie: null,           // {data, rows, cols, row0, col0}
-  columns: [],         // [{t, vOff, v: Float32Array, hOff, h: Float32Array}], oldest first; offsets are grid indices
+  columns: [],         // [{t, vOff, v, hOff, h, layers: [[id, top, bottom]]}], oldest first; offsets are grid indices
   paused: false,
   autoZoom: true,
   autoLevels: true,
+  showGrid: true,
+  showLayers: true,
+  svp: null,           // {time, depth_m: [], speed_mps: []}, depths below the water surface
 };
 
 // ---------------------------------------------------------------------------
@@ -111,7 +130,8 @@ function utc(t) {
   return new Date(t * 1000).toISOString().slice(11, 19);
 }
 
-const HIST = { w: 50, gap: 4, barW: 12 };  // histogram level editor: bars, gap, colour bar (px)
+const HIST = { w: 50, gap: 4, barW: 12 };
+const SIDE_W = 90;  // side strip width (px)  // histogram level editor: bars, gap, colour bar (px)
 
 // ---------------------------------------------------------------------------
 // Panel: one plot. World coordinates have y increasing downward on screen.
@@ -125,7 +145,8 @@ class Panel {
     this.loInput = this.el.querySelector('.lo');
     this.hiInput = this.el.querySelector('.hi');
     Object.assign(this, opts);  // xLabel, yLabel, pinTop, pinRight, equalAspect, describe, overlay
-    this.margin = { l: 58, r: 12 + HIST.w + HIST.gap + HIST.barW + 8, t: 8, b: 34 };
+    this.sideW = this.side ? SIDE_W + 12 : 0;  // optional strip right of the plot (the SVP on the vertical slice)
+    this.margin = { l: 58, r: 12 + this.sideW + HIST.w + HIST.gap + HIST.barW + 8, t: 8, b: 34 };
     this.hist = null;       // histogram of the image values, for the level editor
     this.histRangeFixed = null;  // value range of the histogram, fixed so it doesn't shift with each update
     this.histDrag = null;   // {which: 'lo' | 'hi' | 'both', range, start, levels} while dragging a level
@@ -313,7 +334,7 @@ class Panel {
 
   get histArea() {
     const p = this.plot;
-    const x = p.x + p.w + 12;
+    const x = p.x + p.w + 12 + this.sideW;
     return { x, y: p.y, w: HIST.w, h: p.h, barX: x + HIST.w + HIST.gap, barW: HIST.barW };
   }
 
@@ -469,10 +490,36 @@ class Panel {
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(this.bitmap, sx0, sy0, sx1 - sx0, sy1 - sy0);
     }
+    if (state.showGrid) this.drawGrid();
     if (this.overlay) this.overlay(ctx, this);
     ctx.restore();
     this.drawAxes();
+    if (this.side) this.side(ctx, this);
     this.drawHistogram();
+  }
+
+  ticks(axis) {
+    const p = this.plot, v = this.view;
+    const [a, b, px] = axis === 'x' ? [v.x0, v.x1, p.w / 80] : [v.y0, v.y1, p.h / 40];
+    const step = niceStep(b - a, px), out = [];
+    for (let t = Math.ceil(a / step) * step; t <= b; t += step) out.push(t);
+    return { step, values: out };
+  }
+
+  drawGrid() {
+    const ctx = this.ctx, p = this.plot;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const x of this.ticks('x').values) {
+      const sx = Math.round(this.toScreen(x, 0)[0]) + 0.5;
+      ctx.moveTo(sx, p.y); ctx.lineTo(sx, p.y + p.h);
+    }
+    for (const y of this.ticks('y').values) {
+      const sy = Math.round(this.toScreen(0, y)[1]) + 0.5;
+      ctx.moveTo(p.x, sy); ctx.lineTo(p.x + p.w, sy);
+    }
+    ctx.stroke();
   }
 
   drawAxes() {
@@ -482,20 +529,20 @@ class Panel {
     ctx.fillStyle = '#c9ced6';
     ctx.font = '11px system-ui, sans-serif';
 
-    const xs = niceStep(v.x1 - v.x0, p.w / 80);
+    const { step: xs, values: xticks } = this.ticks('x');
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    for (let x = Math.ceil(v.x0 / xs) * xs; x <= v.x1; x += xs) {
+    for (const x of xticks) {
       const [sx] = this.toScreen(x, 0);
       ctx.fillRect(sx, p.y + p.h, 1, 4);
       ctx.fillText(fmt(x, xs), sx, p.y + p.h + 5);
     }
     ctx.fillText(this.xLabel, p.x + p.w / 2, p.y + p.h + 19);
 
-    const ys = niceStep(v.y1 - v.y0, p.h / 40);
+    const { step: ys, values: yticks } = this.ticks('y');
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    for (let y = Math.ceil(v.y0 / ys) * ys; y <= v.y1; y += ys) {
+    for (const y of yticks) {
       const [, sy] = this.toScreen(0, y);
       ctx.fillRect(p.x - 4, sy, 4, 1);
       ctx.fillText(fmt(y, ys), p.x - 6, sy);
@@ -580,9 +627,103 @@ const panels = {
       const c = columnAt(x);
       return `${Math.round(-x)} pings ago${c ? ' (' + utc(c.t) + ' UTC)' : ''}, depth ${y.toFixed(1)} m`;
     },
-    overlay: (ctx, panel) => { if (state.grid) band(ctx, panel, 'y', ...depthBand(), SLICE_H_COLOR); },
+    overlay: (ctx, panel) => {
+      if (state.grid) band(ctx, panel, 'y', ...depthBand(), SLICE_H_COLOR);
+      if (state.showLayers) drawLayers(ctx, panel);
+    },
+    side: drawSVP,
   }),
 };
+
+// ---------------------------------------------------------------------------
+// Experimental: tracked layers and the sound speed profile on the vertical slice
+// ---------------------------------------------------------------------------
+const LAYER_COLORS = ['#ff9f1c', '#2ec4b6', '#e71d36', '#ffffff', '#a463f2', '#9bf6ff'];
+const LAYER_MIN_COLUMNS = 10;  // only draw layers seen in at least this many columns
+
+// Outline each tracked layer: its top and bottom in every column it was found in.
+function drawLayers(ctx, panel) {
+  const cols = state.columns, N = cols.length, A = state.settings.alongTrackAvg_ping;
+  const count = new Map();
+  for (const c of cols) for (const [id] of c.layers) count.set(id, (count.get(id) || 0) + 1);
+  ctx.lineWidth = 1.5;
+  for (let k = 0; k < N; k++) {
+    const [x0] = panel.toScreen((k - N) * A, 0), [x1] = panel.toScreen((k - N + 1) * A, 0);
+    for (const [id, top, bottom] of cols[k].layers) {
+      if (count.get(id) < LAYER_MIN_COLUMNS) continue;
+      ctx.strokeStyle = LAYER_COLORS[id % LAYER_COLORS.length];
+      const [, y0] = panel.toScreen(0, top), [, y1] = panel.toScreen(0, bottom);
+      ctx.beginPath();
+      ctx.moveTo(x0, y0); ctx.lineTo(x1, y0);
+      ctx.moveTo(x0, y1); ctx.lineTo(x1, y1);
+      ctx.stroke();
+    }
+  }
+}
+
+// Sound speed profile in the strip right of the vertical slice, on the same depth scale.
+function drawSVP(ctx, panel) {
+  const p = panel.plot, x = p.x + p.w + 12, w = SIDE_W, v = panel.view;
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--plot-bg');
+  ctx.fillRect(x, p.y, w, p.h);
+  ctx.strokeStyle = '#4a505c';
+  ctx.strokeRect(x + 0.5, p.y + 0.5, w - 1, p.h - 1);
+  ctx.fillStyle = '#c9ced6';
+  ctx.font = '11px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText('SVP (m/s)', x + w / 2, p.y + p.h + 19);
+  const svp = state.svp, s = state.settings;
+  if (!svp || !s || !v) {
+    ctx.fillStyle = '#9aa1ad';
+    ctx.fillText('no SVP', x + w / 2, p.y + p.h / 2);
+    return;
+  }
+  // SVP depths are below the surface; shift them when depths are measured from the transducer.
+  const shift = s.referenceToSurface ? 0 : -(s.transducerDepth_m || 0);
+  const pts = svp.depth_m.map((d, i) => [d + shift, svp.speed_mps[i]]);
+  const inView = pts.filter(([d]) => d >= v.y0 && d <= v.y1);
+  if (!inView.length) return;
+  let lo = Math.min(...inView.map(q => q[1])), hi = Math.max(...inView.map(q => q[1]));
+  if (hi - lo < 1) { lo -= 0.5; hi += 0.5; }
+  const pad = (hi - lo) * 0.1;
+  lo -= pad; hi += pad;
+  const sx = c => x + (c - lo) / (hi - lo) * w;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, p.y, w, p.h);
+  ctx.clip();
+  // Velocline: the depth of the strongest sound speed gradient in view.
+  let best = null;
+  for (let i = 1; i < pts.length; i++) {
+    const [d0, c0] = pts[i - 1], [d1, c1] = pts[i];
+    if (d1 <= d0 || d0 < v.y0 || d1 > v.y1) continue;
+    const g = Math.abs((c1 - c0) / (d1 - d0));
+    if (!best || g > best.g) best = { g, d: (d0 + d1) / 2 };
+  }
+  if (best) {
+    const [, y] = panel.toScreen(0, best.d);
+    ctx.strokeStyle = 'rgba(255, 159, 28, 0.8)';
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + w, y); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  ctx.strokeStyle = '#e3e6eb';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  pts.forEach(([d, c], i) => {
+    const [, y] = panel.toScreen(0, d);
+    if (i) ctx.lineTo(sx(c), y); else ctx.moveTo(sx(c), y);
+  });
+  ctx.stroke();
+  ctx.restore();
+  ctx.fillStyle = '#c9ced6';
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.fillText((lo + pad).toFixed(0), x, p.y + p.h + 4);
+  ctx.textAlign = 'right';
+  ctx.fillText((hi - pad).toFixed(0), x + w, p.y + p.h + 4);
+}
 
 // ---------------------------------------------------------------------------
 // Building panel images from received data
@@ -682,6 +823,19 @@ pauseButton.addEventListener('click', () => {
   if (!state.paused) redrawAll();
 });
 
+document.getElementById('grid').addEventListener('change', ev => {
+  state.showGrid = ev.target.checked;
+  for (const p of Object.values(panels)) p.draw();
+});
+document.getElementById('layers').addEventListener('change', ev => {
+  state.showLayers = ev.target.checked;
+  panels.vertical.draw();
+});
+document.getElementById('colormap').addEventListener('change', ev => {
+  LUT = LUTS[ev.target.value];
+  for (const p of Object.values(panels)) if (p.image) { p.colorize(); p.draw(); }
+});
+
 const autoLevelsBox = document.getElementById('autolevels');
 function setAutoLevels(on) {
   if (state.autoLevels === on) return;
@@ -699,7 +853,7 @@ settingsToggle.addEventListener('click', () => {
 });
 
 function showSettings() {
-  for (const input of settingsForm.querySelectorAll('input')) {
+  for (const input of settingsForm.querySelectorAll('input, select')) {
     if (document.activeElement === input) continue;
     if (input.type === 'checkbox') input.checked = state.settings[input.name];
     else input.value = state.settings[input.name];
@@ -711,6 +865,10 @@ function showSettings() {
 }
 
 
+settingsForm.elements.sidelobeSuppression.addEventListener('change', ev => {
+  send({ type: 'settings', settings: { sidelobeSuppression: ev.target.value } });
+});
+
 // The depth reference applies as soon as it is ticked, like the toolbar checkboxes.
 settingsForm.elements.referenceToSurface.addEventListener('change', ev => {
   send({ type: 'settings', settings: { referenceToSurface: ev.target.checked } });
@@ -719,8 +877,9 @@ settingsForm.elements.referenceToSurface.addEventListener('change', ev => {
 settingsForm.addEventListener('submit', ev => {
   ev.preventDefault();
   const requested = {};
-  for (const input of settingsForm.querySelectorAll('input')) {
+  for (const input of settingsForm.querySelectorAll('input, select')) {
     if (input.type === 'checkbox') requested[input.name] = input.checked;
+    else if (input.tagName === 'SELECT') requested[input.name] = input.value;
     else if (input.value !== '') requested[input.name] = Number(input.value);
   }
   send({ type: 'settings', settings: requested });
@@ -770,7 +929,8 @@ function handleBinary(buf) {
     let pos = 0;
     for (const [, len] of [...v, ...h]) { vals.push(payload.subarray(pos, pos + len)); pos += len; }
     for (let k = 0; k < count; k++) {
-      state.columns.push({ t: times[k], vOff: v[k][0], v: vals[k], hOff: h[k][0], h: vals[count + k] });
+      state.columns.push({ t: times[k], vOff: v[k][0], v: vals[k], hOff: h[k][0], h: vals[count + k],
+                           layers: header.layers[k] });
     }
     const max = historyColumns();
     if (state.columns.length > max) state.columns.splice(0, state.columns.length - max);
@@ -794,6 +954,9 @@ function handleText(msg) {
     for (const p of Object.values(panels)) p.draw();
   } else if (msg.type === 'reset') {
     resetData();
+  } else if (msg.type === 'svp') {
+    state.svp = msg;
+    panels.vertical.draw();
   } else if (msg.type === 'stats') {
     showStats(msg.stats);
   }

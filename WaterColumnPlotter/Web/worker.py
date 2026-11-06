@@ -21,12 +21,13 @@ from KMALL.kmall import kmall
 
 from WaterColumnPlotter.Web.gridding import (GridTooLarge, add_blocks, average, grid_mwc, horizontal_band,
                                              vertical_band)
+from WaterColumnPlotter.Web.layers import LayerTracker
 
 logger = logging.getLogger(__name__)
 
 # Settings whose change discards everything processed so far: the cell size and depth reference (which place data
 # in the grid), and the along-track averaging (which sets how many pings each slice column spans).
-RESET_SETTINGS = ('binSize_m', 'alongTrackAvg_ping', 'referenceToSurface', 'transducerDepth_m')
+RESET_SETTINGS = ('binSize_m', 'alongTrackAvg_ping', 'referenceToSurface', 'transducerDepth_m', 'sidelobeSuppression')
 
 
 def band_sum(sums, counts, offset, band, axis):
@@ -57,7 +58,9 @@ class Worker:
         self.recent = collections.deque(maxlen=s['alongTrackAvg_ping'])
         # Slice column being accumulated: {'pings': set of pingCnt, 'v': block, 'h': block, 'times': []}
         self.column = None
-        self.new_columns = []  # Completed slice columns since the last update: (time, (v_off, v), (h_off, h))
+        # Completed slice columns since the last update: (time, (v_off, v), (h_off, h), layers)
+        self.new_columns = []
+        self.tracker = LayerTracker(min_level_db=s['layerMinLevel_dB'])
         self.v_band = vertical_band(s)
         self.h_band = horizontal_band(s)
 
@@ -70,13 +73,16 @@ class Worker:
         else:
             self.v_band = vertical_band(new)
             self.h_band = horizontal_band(new)
+            self.tracker.min_level_db = new['layerMinLevel_dB']
         return reset
 
     def finish_column(self):
         c = self.column
         (v_off,), v = average(c['v'])
         (h_off,), h = average(c['h'])
-        self.new_columns.append((float(np.mean(c['times'])), (v_off, v), (h_off, h)))
+        t = float(np.mean(c['times']))
+        layers = self.tracker.add_profile(t, (v_off + np.arange(len(v))) * self.settings['binSize_m'], v)
+        self.new_columns.append((t, (v_off, v), (h_off, h), layers))
         self.column = None
 
     def process_installation(self, data):
@@ -100,7 +106,7 @@ class Worker:
         s = self.settings
         depth_offset = (s['transducerDepth_m'] or 0.0) if s['referenceToSurface'] else 0.0
         try:
-            result = grid_mwc(dg, s['binSize_m'], depth_offset)
+            result = grid_mwc(dg, s['binSize_m'], depth_offset, s['sidelobeSuppression'])
         except GridTooLarge:
             self.stats['grid_too_large'] += 1
             return
@@ -172,6 +178,12 @@ def run(settings, in_queue, settings_queue, out_queue, update_interval):
             item = in_queue.get(timeout=max(0.0, next_update - time.monotonic()))
             if isinstance(item, tuple):
                 receiver_stats = item[1]
+            elif item[4:8] == b'#SVP':
+                worker.km.OpenBytestoRead(item)
+                svp = worker.km.read_EMdgmSVP()
+                out_queue.put({'type': 'svp', 'time': svp['time_sec'],
+                               'depth_m': [round(float(d), 2) for d in svp['sensorData']['depth_m']],
+                               'speed_mps': [round(float(c), 2) for c in svp['sensorData']['soundVelocity_mPerSec']]})
             elif item[4:8] == b'#IIP':
                 depth = worker.process_installation(item)
                 if depth is not None:

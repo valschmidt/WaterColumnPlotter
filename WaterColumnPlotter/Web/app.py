@@ -38,6 +38,8 @@ DEFAULT_SETTINGS = {
     'referenceToSurface': False,
     'transducerDepth_m': None,  # below the waterline; set from #IIP when one is received (None: not yet known)
     'heaveAllowance_m': 1.0,    # room shown above 0 m when depths are measured from the transducer
+    'sidelobeSuppression': 'off',
+    'layerMinLevel_dB': 1.0,    # layer tracking: minimum level above the profile's background
 }
 
 # name: (type, minimum, maximum)
@@ -51,6 +53,8 @@ SETTING_LIMITS = {
     'referenceToSurface': (bool, False, True),
     'transducerDepth_m': (float, -100.0, 100.0),
     'heaveAllowance_m': (float, 0.0, 50.0),
+    'sidelobeSuppression': ('choice', gridding.SIDELOBE_SUPPRESSION),
+    'layerMinLevel_dB': (float, 0.1, 30.0),
 }
 
 
@@ -58,7 +62,12 @@ def validate_settings(current, requested):
     """Returns a copy of current updated with requested values, each converted and clipped to its limits."""
     new = dict(current)
     for name, value in requested.items():
-        if name in SETTING_LIMITS:
+        if name not in SETTING_LIMITS:
+            continue
+        if SETTING_LIMITS[name][0] == 'choice':
+            if value in SETTING_LIMITS[name][1]:
+                new[name] = value
+        else:
             kind, lo, hi = SETTING_LIMITS[name]
             new[name] = min(hi, max(lo, kind(value)))
     return new
@@ -82,6 +91,7 @@ class Server:
         self.settings = dict(DEFAULT_SETTINGS)
         self.history = collections.deque(maxlen=history_columns(self.settings))  # (time, vertical, horizontal)
         self.pie = None
+        self.svp = None  # latest sound speed profile message
         self.stats = {}
         self.clients = set()
 
@@ -109,7 +119,8 @@ class Server:
         # Each column covers only its data: vertical values start at grid row v[0], horizontal at grid column h[0].
         header = {'type': 'columns', 'count': len(columns), 'times': [c[0] for c in columns],
                   'v': [[c[1][0], len(c[1][1])] for c in columns],
-                  'h': [[c[2][0], len(c[2][1])] for c in columns]}
+                  'h': [[c[2][0], len(c[2][1])] for c in columns],
+                  'layers': [c[3] for c in columns]}
         return frame(header, *[c[1][1] for c in columns], *[c[2][1] for c in columns])
 
     def pie_frame(self):
@@ -148,6 +159,9 @@ class Server:
             if msg['type'] == 'reset':
                 self.clear()
                 await self.broadcast(json.dumps({'type': 'reset'}))
+            elif msg['type'] == 'svp':
+                self.svp = json.dumps(msg)
+                await self.broadcast(self.svp)
             elif msg['type'] == 'installation':
                 # Transducer depth from an #IIP datagram; only a change is applied.
                 if msg['transducerDepth_m'] != self.settings['transducerDepth_m']:
@@ -177,6 +191,8 @@ class Server:
             await ws.send_bytes(self.columns_frame(list(self.history)))
         if self.pie is not None:
             await ws.send_bytes(self.pie_frame())
+        if self.svp is not None:
+            await ws.send_str(self.svp)
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:

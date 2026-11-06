@@ -24,10 +24,53 @@ class GridTooLarge(Exception):
     pass
 
 
-def grid_mwc(dg, bin_size, depth_offset=0.0):
+# Sidelobe suppression choices: subtract, at each range sample, a statistic of all beams' values at that range;
+# 'median_beam' first subtracts each beam's median (inside the minimum slant range), which evens out differences
+# between transmit sectors and across the beam pattern.
+SIDELOBE_SUPPRESSION = ('off', 'mean', 'median', 'median_beam')
+
+
+def sorted_median(values, row, col, counts):
+    """Median of values per row, where (row, col) places each value in a table and counts is values per row."""
+    table = np.full((len(counts), int(col.max()) + 1), np.inf, dtype=np.float32)
+    table[row, col] = values
+    table.sort(axis=1)  # missing entries (inf) sort to the end of each row
+    lo, hi, r = np.maximum((counts - 1) // 2, 0), np.maximum(counts // 2, 0), np.arange(len(counts))
+    return (table[r, lo] + table[r, hi]) / 2
+
+
+def per_beam_median(values, beam_index, sample_number, max_sample):
+    """For every sample, its beam's median over samples before max_sample (inside the minimum slant range)."""
+    use = sample_number < max_sample
+    nbeams = int(beam_index.max()) + 1
+    counts = np.bincount(beam_index[use], minlength=nbeams)
+    if not counts.any():
+        return np.zeros_like(values)
+    med = sorted_median(values[use], beam_index[use], sample_number[use] - sample_number[use].min(), counts)
+    return np.where(counts > 0, med, 0.0)[beam_index]
+
+
+def across_beam_statistic(values, beam_index, sample_number, how):
+    """
+    For every sample, the mean or median (dB) of all beams' samples at the same range sample number. Subtracting it
+    suppresses features that are the same across beams at a given range, such as the seafloor echo received through
+    the sidelobes beyond the minimum slant range.
+    """
+    s = sample_number - sample_number.min()
+    n = int(s.max()) + 1
+    counts = np.bincount(s, minlength=n)
+    if how == 'mean':
+        return (np.bincount(s, weights=values, minlength=n) / np.maximum(counts, 1))[s]
+    # Median: one row per range sample, beams along the row.
+    return sorted_median(values, s, beam_index, counts)[s]
+
+
+def grid_mwc(dg, bin_size, depth_offset=0.0, sidelobe_suppression='off'):
     """
     Grid one #MWC datagram (as returned by pykmall's kmall.read_EMdgmMWC()). depth_offset (m) is added to every
     depth: the transducer's depth below the waterline, to reference depths to the water surface.
+    sidelobe_suppression: 'off', or 'mean' / 'median' to subtract that across-beam statistic at each range sample
+    (values are then dB relative to it); 'median_beam' first subtracts each beam's median.
     :return: (sums, counts, row0, col0): 2D arrays of summed amplitude (dB) and sample count per cell, and the
     row and column index of their first cell. Returns None if the ping has no bottom detections.
     :raises GridTooLarge: if the block would exceed MAX_CELLS cells.
@@ -55,6 +98,15 @@ def grid_mwc(dg, bin_size, depth_offset=0.0):
     beam_index = np.repeat(np.arange(len(n_use)), n_use)
     first = np.repeat(np.cumsum(n_use) - n_use, n_use)
     sample_number = np.arange(total) - first + start[beam_index]
+
+    if sidelobe_suppression == 'median_beam':
+        # First even out the beams: subtract each beam's median inside the minimum slant range (the shortest bottom
+        # detection), where every beam sees only water. (Doing this after the range median over-corrects beyond
+        # the minimum slant range.)
+        amplitudes = amplitudes - per_beam_median(amplitudes, beam_index, sample_number, int(det.min()))
+    if sidelobe_suppression != 'off':
+        how = 'mean' if sidelobe_suppression == 'mean' else 'median'
+        amplitudes = amplitudes - across_beam_statistic(amplitudes, beam_index, sample_number, how)
 
     rx = dg['rxInfo']
     sample_range = sample_number.astype(np.float32) * np.float32(rx['soundVelocity_mPerSec'] / (2.0 * rx['sampleFreq_Hz']))
