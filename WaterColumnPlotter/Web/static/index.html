@@ -13,14 +13,19 @@
     <button id="pause" type="button">Pause</button>
     <label class="check" title="Fit the plots to the data as it arrives. Zooming or panning by hand turns this off; double-click a plot to turn it back on."><input type="checkbox" id="autozoom" checked> Auto-zoom</label>
     <label class="check" title="Faint grid lines at the axis ticks."><input type="checkbox" id="grid" checked> Grid</label>
-    <label class="check" title="Experimental: outline scattering layers tracked in the vertical slice."><input type="checkbox" id="layers" checked> Layers</label>
-    <label title="Colour map for all plots.">Colours
+    <label title="Experimental features tracked in the vertical slice. Layers (after Roland Arsenault's watercolumn_layer_tracker): every scattering layer standing out from the background, any number, outlined top and bottom with a color per layer. Thermocline (after Jose Cordero Ros's MS thesis): one line, the bottom of the scattering layer that marks the bottom of the thermocline, green or red by the outer-beam depth error from using the last cast.">Tracking
+      <select id="tracking">
+        <option value="off">Off</option>
+        <option value="layers">Layers</option>
+        <option value="thermocline" selected>Thermocline</option>
+      </select></label>
+    <label title="Color map for all plots.">Colors
       <select id="colormap">
         <option value="viridis">Viridis</option>
         <option value="jet">Jet</option>
         <option value="grayscale">Grayscale</option>
       </select></label>
-    <label class="check" title="Keep each plot's colour scale at the 10th to 90th percentile of its data. Adjusting a scale by hand turns this off."><input type="checkbox" id="autolevels" checked> Auto levels</label>
+    <label class="check" title="Keep each plot's color scale at the 10th to 90th percentile of its data. Adjusting a scale by hand turns this off."><input type="checkbox" id="autolevels" checked> Auto levels</label>
     <button id="settings-toggle" type="button" aria-expanded="false" aria-controls="settings">Settings</button>
     <span id="status" class="status">Connecting…</span>
   </header>
@@ -30,11 +35,11 @@
       <fieldset>
         <legend title="Each sample is placed in a grid of square cells, the same size across-track and in depth. The grid grows to cover the data.">Pie grid</legend>
         <label title="Size of the square grid cells, across-track and in depth: the resolution of all three plots.">Cell size <span class="unit">m</span><input name="binSize_m" type="number" step="any" min="0.01"></label>
-        <label title="Subtract, at each range, the mean or median of all beams at that range. Suppresses the seafloor echo received through sidelobes beyond the minimum slant range; values become dB relative to that level. "Range and beam medians" also subtracts each beam's median, evening out transmit sectors and the beam pattern. Applies immediately, for everyone.">Sidelobe suppression
+        <label title="Subtract, at each range, the median of all beams at that range. Suppresses the seafloor echo received through sidelobes beyond the minimum slant range; values become dB relative to that level. “Per sector” takes the median separately over each transmit sector's beams, evening out level differences between sectors. “Range and beam medians” first subtracts each beam's median, evening out sectors and the beam pattern. Applies immediately, for everyone.">Sidelobe suppression
           <select name="sidelobeSuppression">
             <option value="off">Off</option>
-            <option value="mean">Subtract mean</option>
             <option value="median">Subtract median</option>
+            <option value="median_sector">Subtract median per sector</option>
             <option value="median_beam">Subtract range and beam medians</option>
           </select></label>
       </fieldset>
@@ -54,6 +59,14 @@
         <label title="Experimental layer tracking: minimum level above the profile's background for a layer. Applies to new data.">Layer threshold <span class="unit">dB</span><input name="layerMinLevel_dB" type="number" step="any" min="0.1"></label>
       </fieldset>
       <fieldset>
+        <legend title="Experimental, after Cordero Ros (UNH MS thesis, 2018): a scattering layer often marks the bottom of the thermocline. The vertical slice is smoothed, and the deepest sharp drop in level with depth is picked. Movement is measured from the picks just after a cast arrives (or, for a cast taken over 10 minutes before the data, from the cast's thermocline bottom); the cast's thermocline is shifted by that movement and ray traced to estimate the outer-beam depth error.">Thermocline</legend>
+        <label title="Minimum sharpness of the drop in level with depth (high-passed vertical gradient) for a pick. Lower finds more, and noisier, picks.">Pick threshold <span class="unit">dB/m</span><input name="thermoclineThreshold_dBpm" type="number" step="any" min="0.01"></label>
+        <label title="Along-track smoothing before picking: columns from this many seconds back are averaged in (Cordero used 310 m).">Smoothing <span class="unit">s</span><input name="thermoclineWindow_s" type="number" step="any" min="0"></label>
+        <label title="Picks are searched for within this distance above and below the last cast's thermocline bottom (Cordero searched the depths where the thermocline was expected).">Search ± <span class="unit">m</span><input name="thermoclineSearch_m" type="number" step="any" min="0.5"></label>
+        <label title="Beam angle from vertical at which the depth error is computed.">Alert angle <span class="unit">°</span><input name="castAlertAngle_deg" type="number" step="any" min="0" max="80"></label>
+        <label title="Depth error at the alert angle beyond which picks turn red: a new cast is advised. Cordero used 0.5 m, about half the IHO Order 1 allowance.">Alert error <span class="unit">m</span><input name="castAlertError_m" type="number" step="any" min="0.01"></label>
+      </fieldset>
+      <fieldset>
         <legend>All plots</legend>
         <label title="The pie shows the average of this many recent pings, and each slice column averages this many pings.">Along-track average <span class="unit">pings</span><input name="alongTrackAvg_ping" type="number" step="1" min="1"></label>
         <label title="When depth is measured from the transducer, the pie and vertical slice start this far above 0 m, so data raised above the transducer by heave stays visible.">Heave allowance <span class="unit">m</span><input name="heaveAllowance_m" type="number" step="any" min="0"></label>
@@ -69,8 +82,8 @@
         <h2>Pie</h2>
         <span class="readout"></span>
         <span class="levels">
-          <input class="lo" type="number" step="any" aria-label="Colour scale minimum (dB)"> to
-          <input class="hi" type="number" step="any" aria-label="Colour scale maximum (dB)"> dB
+          <input class="lo" type="number" step="any" aria-label="Color scale minimum (dB)"> to
+          <input class="hi" type="number" step="any" aria-label="Color scale maximum (dB)"> dB
         </span>
       </div>
       <canvas></canvas>
@@ -80,8 +93,8 @@
         <h2>Horizontal slice</h2>
         <span class="readout"></span>
         <span class="levels">
-          <input class="lo" type="number" step="any" aria-label="Colour scale minimum (dB)"> to
-          <input class="hi" type="number" step="any" aria-label="Colour scale maximum (dB)"> dB
+          <input class="lo" type="number" step="any" aria-label="Color scale minimum (dB)"> to
+          <input class="hi" type="number" step="any" aria-label="Color scale maximum (dB)"> dB
         </span>
       </div>
       <canvas></canvas>
@@ -91,8 +104,8 @@
         <h2>Vertical slice</h2>
         <span class="readout"></span>
         <span class="levels">
-          <input class="lo" type="number" step="any" aria-label="Colour scale minimum (dB)"> to
-          <input class="hi" type="number" step="any" aria-label="Colour scale maximum (dB)"> dB
+          <input class="lo" type="number" step="any" aria-label="Color scale minimum (dB)"> to
+          <input class="hi" type="number" step="any" aria-label="Color scale maximum (dB)"> dB
         </span>
       </div>
       <canvas></canvas>

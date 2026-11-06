@@ -24,10 +24,11 @@ class GridTooLarge(Exception):
     pass
 
 
-# Sidelobe suppression choices: subtract, at each range sample, a statistic of all beams' values at that range;
-# 'median_beam' first subtracts each beam's median (inside the minimum slant range), which evens out differences
-# between transmit sectors and across the beam pattern.
-SIDELOBE_SUPPRESSION = ('off', 'mean', 'median', 'median_beam')
+# Sidelobe suppression choices: subtract, at each range sample, the median of all beams' values at that range;
+# 'median_sector' takes the median separately over each transmit sector's beams; 'median_beam' first subtracts each
+# beam's median (inside the minimum slant range), which evens out differences between transmit sectors and across
+# the beam pattern.
+SIDELOBE_SUPPRESSION = ('off', 'median', 'median_sector', 'median_beam')
 
 
 def sorted_median(values, row, col, counts):
@@ -50,35 +51,37 @@ def per_beam_median(values, beam_index, sample_number, max_sample):
     return np.where(counts > 0, med, 0.0)[beam_index]
 
 
-def across_beam_statistic(values, beam_index, sample_number, how):
+def across_beam_median(values, beam_index, sample_number, group=None):
     """
-    For every sample, the mean or median (dB) of all beams' samples at the same range sample number. Subtracting it
-    suppresses features that are the same across beams at a given range, such as the seafloor echo received through
-    the sidelobes beyond the minimum slant range.
+    For every sample, the median (dB) of all beams' samples at the same range sample number, or, if group (an integer
+    per sample, such as the transmit sector) is given, of the beams in the same group. Subtracting it suppresses
+    features that are the same across beams at a given range, such as the seafloor echo received through the
+    sidelobes beyond the minimum slant range.
     """
     s = sample_number - sample_number.min()
     n = int(s.max()) + 1
-    counts = np.bincount(s, minlength=n)
-    if how == 'mean':
-        return (np.bincount(s, weights=values, minlength=n) / np.maximum(counts, 1))[s]
-    # Median: one row per range sample, beams along the row.
-    return sorted_median(values, s, beam_index, counts)[s]
+    row = s if group is None else (group - group.min()) * n + s  # one table row per (group,) range sample
+    counts = np.bincount(row, minlength=int(row.max()) + 1)
+    return sorted_median(values, row, beam_index, counts)[row]
 
 
 def grid_mwc(dg, bin_size, depth_offset=0.0, sidelobe_suppression='off'):
     """
     Grid one #MWC datagram (as returned by pykmall's kmall.read_EMdgmMWC()). depth_offset (m) is added to every
     depth: the transducer's depth below the waterline, to reference depths to the water surface.
-    sidelobe_suppression: 'off', or 'mean' / 'median' to subtract that across-beam statistic at each range sample
+    sidelobe_suppression: 'off', or 'median' / 'median_sector' to subtract the median across beams (or across each
+    transmit sector's beams) at each range sample
     (values are then dB relative to it); 'median_beam' first subtracts each beam's median.
-    :return: (sums, counts, row0, col0): 2D arrays of summed amplitude (dB) and sample count per cell, and the
-    row and column index of their first cell. Returns None if the ping has no bottom detections.
+    :return: (sums, counts, row0, col0, bottom): 2D arrays of summed amplitude (dB) and sample count per cell, the
+    row and column index of their first cell, and the bottom detections as (across-track, depth) arrays (m) for the
+    beams that have one. Returns None if the ping has no bottom detections.
     :raises GridTooLarge: if the block would exceed MAX_CELLS cells.
     """
     beam = dg['beamData']
     det = np.asarray(beam['detectedRangeInSamples'], dtype=np.int64)
     if not det.any():
         return None
+    detected = det > 0
     # Beams without a bottom detection use the swath's mean detection range.
     det[det == 0] = int(det[det > 0].mean())
 
@@ -105,8 +108,9 @@ def grid_mwc(dg, bin_size, depth_offset=0.0, sidelobe_suppression='off'):
         # the minimum slant range.)
         amplitudes = amplitudes - per_beam_median(amplitudes, beam_index, sample_number, int(det.min()))
     if sidelobe_suppression != 'off':
-        how = 'mean' if sidelobe_suppression == 'mean' else 'median'
-        amplitudes = amplitudes - across_beam_statistic(amplitudes, beam_index, sample_number, how)
+        sector = np.asarray(beam['beamTxSectorNum'], dtype=np.int64)[beam_index] \
+            if sidelobe_suppression == 'median_sector' else None
+        amplitudes = amplitudes - across_beam_median(amplitudes, beam_index, sample_number, sector)
 
     rx = dg['rxInfo']
     sample_range = sample_number.astype(np.float32) * np.float32(rx['soundVelocity_mPerSec'] / (2.0 * rx['sampleFreq_Hz']))
@@ -118,8 +122,11 @@ def grid_mwc(dg, bin_size, depth_offset=0.0, sidelobe_suppression='off'):
                       [np.asarray(beam['beamTxSectorNum'])])
     # Kongsberg beam angles are positive to port; across-track here is positive to starboard.
     across = sample_range * (-np.sin(beam_angle))[beam_index]
-    depth = sample_range * (np.cos(tilt) * np.cos(beam_angle))[beam_index] \
-        + np.float32(dg['txInfo']['heave_m'] + depth_offset)
+    vertical_offset = np.float32(dg['txInfo']['heave_m'] + depth_offset)
+    depth = sample_range * (np.cos(tilt) * np.cos(beam_angle))[beam_index] + vertical_offset
+    det_range = det[detected] * np.float32(rx['soundVelocity_mPerSec'] / (2.0 * rx['sampleFreq_Hz']))
+    bottom = (det_range * -np.sin(beam_angle[detected]),
+              det_range * np.cos(tilt[detected]) * np.cos(beam_angle[detected]) + vertical_offset)
 
     col = np.floor(across / bin_size).astype(np.int64)
     row = np.floor(depth / bin_size).astype(np.int64)
@@ -131,7 +138,7 @@ def grid_mwc(dg, bin_size, depth_offset=0.0, sidelobe_suppression='off'):
     cell = (row - row0) * ncols + (col - col0)
     sums = np.bincount(cell, weights=amplitudes, minlength=nrows * ncols).reshape(nrows, ncols)
     counts = np.bincount(cell, minlength=nrows * ncols).reshape(nrows, ncols)
-    return sums, counts, row0, col0
+    return sums, counts, row0, col0, bottom
 
 
 def vertical_band(settings):

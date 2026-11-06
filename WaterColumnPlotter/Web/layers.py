@@ -13,11 +13,31 @@ A reimplementation of the approach in Roland Arsenault's watercolumn_layer_track
 
 Differences from the original: it works on the plotter's averaged nadir-band columns rather than a single nadir
 beam, it excludes the seafloor echo and the first metre below the transducer from the background fit and from the
-search (the seafloor is the first value more than seafloor_db above the profile's median), and layers are not
+search (the seafloor is the shallowest bottom detection in the band, or else the first value more than seafloor_db
+above the profile's median), and layers are not
 split at a maximum duration.
 """
 
 import numpy as np
+
+
+def search_range(depths, values, exclude_top_m, exclude_bottom_m, seafloor_m=None, seafloor_db=20.0):
+    """
+    Indices [lo, hi) of a profile to search for layers: from exclude_top_m below its first value to exclude_bottom_m
+    above the seafloor. The seafloor is seafloor_m if given (the shallowest bottom detection in the profile's band),
+    otherwise the first value more than seafloor_db above the profile's median (or its last value).
+    """
+    ok = np.isfinite(values)
+    if ok.sum() < 10:
+        return 0, 0
+    b = depths[1] - depths[0]
+    first, last = np.flatnonzero(ok)[[0, -1]]
+    if seafloor_m is not None:
+        seafloor = min(int(np.searchsorted(depths, seafloor_m)), last)
+    else:
+        loud = np.flatnonzero(ok & (np.where(ok, values, -np.inf) > np.nanmedian(values) + seafloor_db))
+        seafloor = loud[0] if len(loud) else last
+    return first + int(np.ceil(exclude_top_m / b)), seafloor - int(np.ceil(exclude_bottom_m / b))
 
 
 class LayerTracker:
@@ -33,21 +53,13 @@ class LayerTracker:
         self.layers = []  # {'id', 'slices': [(time, top, bottom, level)]}
         self.next_id = 0
 
-    def slices(self, depths, values):
+    def slices(self, depths, values, seafloor_m=None):
         """Candidate layer slices in one profile: list of (top, bottom, average dB above background)."""
-        ok = np.isfinite(values)
-        if ok.sum() < 10:
-            return []
-        b = depths[1] - depths[0] if len(depths) > 1 else 1.0
-        first, last = np.flatnonzero(ok)[[0, -1]]
-        # The seafloor echo: the first value far above the profile's median level (or the deepest data).
-        loud = np.flatnonzero(ok & (np.where(ok, values, -np.inf) > np.nanmedian(values) + self.seafloor_db))
-        seafloor = loud[0] if len(loud) else last
         # Search between just below the transducer and just above the seafloor echo.
-        lo = first + int(np.ceil(self.exclude_top_m / b))
-        hi = seafloor - int(np.ceil(self.exclude_bottom_m / b))
+        lo, hi = search_range(depths, values, self.exclude_top_m, self.exclude_bottom_m, seafloor_m, self.seafloor_db)
         if hi - lo < 10:
             return []
+        b = depths[1] - depths[0]
         d, v = depths[lo:hi], values[lo:hi]
         fit = np.isfinite(v)
         coeffs = np.polyfit(d[fit], v[fit], 2)
@@ -73,11 +85,11 @@ class LayerTracker:
                 chosen.append((top, bottom, level))
         return chosen
 
-    def add_profile(self, time, depths, values):
+    def add_profile(self, time, depths, values, seafloor_m=None):
         """Track the layers in one profile. Returns [(layer id, top, bottom), ...] for this profile."""
         self.layers = [L for L in self.layers if time - L['slices'][-1][0] <= self.max_gap_s]
         found = []
-        for top, bottom, level in self.slices(depths, values):
+        for top, bottom, level in self.slices(depths, values, seafloor_m):
             best, best_score = None, 0.0
             for L in self.layers:
                 recent = [s for s in L['slices'] if time - s[0] <= self.max_gap_s]

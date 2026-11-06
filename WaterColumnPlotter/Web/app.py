@@ -40,6 +40,12 @@ DEFAULT_SETTINGS = {
     'heaveAllowance_m': 1.0,    # room shown above 0 m when depths are measured from the transducer
     'sidelobeSuppression': 'off',
     'layerMinLevel_dB': 1.0,    # layer tracking: minimum level above the profile's background
+    # Thermocline tracking (after Cordero Ros, 2018)
+    'thermoclineThreshold_dBpm': 0.2,  # minimum high-passed level gradient for a pick
+    'thermoclineWindow_s': 60.0,       # along-track smoothing window
+    'thermoclineSearch_m': 6.0,        # picks are searched for within this of the cast's thermocline bottom
+    'castAlertError_m': 0.5,           # outer-beam depth error beyond which a new cast is advised
+    'castAlertAngle_deg': 65.0,        # beam angle for the depth error
 }
 
 # name: (type, minimum, maximum)
@@ -55,6 +61,11 @@ SETTING_LIMITS = {
     'heaveAllowance_m': (float, 0.0, 50.0),
     'sidelobeSuppression': ('choice', gridding.SIDELOBE_SUPPRESSION),
     'layerMinLevel_dB': (float, 0.1, 30.0),
+    'thermoclineThreshold_dBpm': (float, 0.01, 50.0),
+    'thermoclineWindow_s': (float, 0.0, 3600.0),
+    'thermoclineSearch_m': (float, 0.5, 1000.0),
+    'castAlertError_m': (float, 0.01, 100.0),
+    'castAlertAngle_deg': (float, 0.0, 80.0),
 }
 
 
@@ -120,7 +131,7 @@ class Server:
         header = {'type': 'columns', 'count': len(columns), 'times': [c[0] for c in columns],
                   'v': [[c[1][0], len(c[1][1])] for c in columns],
                   'h': [[c[2][0], len(c[2][1])] for c in columns],
-                  'layers': [c[3] for c in columns]}
+                  'layers': [c[3] for c in columns], 'thermocline': [c[4] for c in columns]}
         return frame(header, *[c[1][1] for c in columns], *[c[2][1] for c in columns])
 
     def pie_frame(self):

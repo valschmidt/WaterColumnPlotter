@@ -1,7 +1,7 @@
 'use strict';
 
 // ---------------------------------------------------------------------------
-// Colour maps: 256-entry RGB lookup tables. LUT is the one in use.
+// Color maps: 256-entry RGB lookup tables. LUT is the one in use.
 // ---------------------------------------------------------------------------
 function makeLUT(rgb) {
   const lut = new Uint8ClampedArray(256 * 3);
@@ -56,7 +56,7 @@ const state = {
   autoZoom: true,
   autoLevels: true,
   showGrid: true,
-  showLayers: true,
+  tracking: 'thermocline',  // tracked features drawn on the vertical slice: 'off', 'layers' or 'thermocline'
   svp: null,           // {time, depth_m: [], speed_mps: []}, depths below the water surface
 };
 
@@ -131,7 +131,7 @@ function utc(t) {
 }
 
 const HIST = { w: 50, gap: 4, barW: 12 };
-const SIDE_W = 90;  // side strip width (px)  // histogram level editor: bars, gap, colour bar (px)
+const SIDE_W = 90;  // side strip width (px)  // histogram level editor: bars, gap, color bar (px)
 
 // ---------------------------------------------------------------------------
 // Panel: one plot. World coordinates have y increasing downward on screen.
@@ -199,8 +199,8 @@ class Panel {
     this.draw();
   }
 
-  // Set the colour scale to the 10th to 90th percentile of the data. With smooth, move only part of the way there,
-  // so continuous auto levels don't make the colours jump from one update to the next.
+  // Set the color scale to the 10th to 90th percentile of the data. With smooth, move only part of the way there,
+  // so continuous auto levels don't make the colors jump from one update to the next.
   autoLevels(redraw = true, smooth = false) {
     if (!this.image) return;
     const p = percentiles(this.image.data, 0.10, 0.90);
@@ -320,7 +320,7 @@ class Panel {
     c.addEventListener('pointerleave', () => { this.readout.textContent = ''; });
     c.addEventListener('dblclick', ev => {
       if (this.inHist(ev.offsetX, ev.offsetY)) {
-        // Reset this plot's histogram range and colour scale to their defaults.
+        // Reset this plot's histogram range and color scale to their defaults.
         if (this.image) this.histRangeFixed = histogramRange(this.image.data);
         if (this.histRangeFixed) this.hist = histogram(this.image.data, this.histRangeFixed);
         this.autoLevels();
@@ -330,7 +330,7 @@ class Panel {
     });
   }
 
-  // ----- Histogram and colour-level editor, to the right of the plot -----
+  // ----- Histogram and color-level editor, to the right of the plot -----
 
   get histArea() {
     const p = this.plot;
@@ -408,7 +408,7 @@ class Panel {
     ctx.fillStyle = 'rgba(78, 161, 255, 0.15)';
     ctx.fillRect(a.x, yhi, a.w, ylo - yhi);
 
-    // Bars grow leftward from the colour bar; square-root scaling keeps small counts visible.
+    // Bars grow leftward from the color bar; square-root scaling keeps small counts visible.
     const nb = h.counts.length, bw = (h.hi - h.lo) / nb;
     ctx.fillStyle = 'rgba(205, 210, 220, 0.6)';
     for (let i = 0; i < nb; i++) {
@@ -418,7 +418,7 @@ class Panel {
       ctx.fillRect(a.x + a.w - w, y0, w, Math.max(1, y1 - y0));
     }
 
-    // Colour bar: values below the minimum get the lowest colour, above the maximum the highest.
+    // Color bar: values below the minimum get the lowest color, above the maximum the highest.
     for (let y = 0; y < a.h; y += 2) {
       const t = (this.yToValue(a.y + y, range) - lo) / (hi - lo);
       const k = Math.max(0, Math.min(255, Math.round(t * 255))) * 3;
@@ -458,7 +458,7 @@ class Panel {
     if (!this.view) return;
     const p = this.plot;
     if (this.inHist(sx, sy)) {
-      this.readout.textContent = 'Colour scale: drag the lines or the band between them; double-click for auto';
+      this.readout.textContent = 'Color scale: drag the lines or the band between them; double-click for auto';
       return;
     }
     if (sx < p.x || sx > p.x + p.w || sy < p.y || sy > p.y + p.h) { this.readout.textContent = ''; return; }
@@ -629,7 +629,8 @@ const panels = {
     },
     overlay: (ctx, panel) => {
       if (state.grid) band(ctx, panel, 'y', ...depthBand(), SLICE_H_COLOR);
-      if (state.showLayers) drawLayers(ctx, panel);
+      if (state.tracking === 'layers') drawLayers(ctx, panel);
+      if (state.tracking === 'thermocline') drawThermocline(ctx, panel);
     },
     side: drawSVP,
   }),
@@ -661,6 +662,51 @@ function drawLayers(ctx, panel) {
   }
 }
 
+// SVP depths are below the surface; the shift to plot depths when depths are measured from the transducer.
+function svpShift() {
+  const s = state.settings;
+  return s.referenceToSurface ? 0 : -(s.transducerDepth_m || 0);
+}
+
+const ALERT_OK = '#3ddc84', ALERT_BAD = '#ff4d4d', ALERT_NONE = '#c9ced6';
+function alertColor(err) {
+  if (err === null || err === undefined) return ALERT_NONE;
+  return Math.abs(err) > state.settings.castAlertError_m ? ALERT_BAD : ALERT_OK;
+}
+
+// The latest column with a thermocline pick, or undefined.
+function lastPick() {
+  for (let k = state.columns.length - 1; k >= 0; k--) if (state.columns[k].thermo) return state.columns[k].thermo;
+}
+
+// The tracked thermocline bottom, one segment per column colored by the cast alert, and the depth the picks are
+// compared with (dashed): the picks just after the cast, or the cast's thermocline bottom.
+function drawThermocline(ctx, panel) {
+  const cols = state.columns, N = cols.length, A = state.settings.alongTrackAvg_ping, p = panel.plot;
+  const last = lastPick();
+  const ref = last && last[1] !== null ? last[1]
+    : state.svp && state.svp.thermocline_m ? state.svp.thermocline_m[1] + svpShift() : null;
+  if (ref !== null) {
+    const [, y] = panel.toScreen(0, ref);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+    ctx.setLineDash([6, 4]);
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(p.x, y); ctx.lineTo(p.x + p.w, y); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  // A dark outline first, so the line stands out on any color map.
+  for (const [width, color] of [[5, 'rgba(0, 0, 0, 0.8)'], [2.5, null]]) {
+    ctx.lineWidth = width;
+    for (let k = 0; k < N; k++) {
+      const t = cols[k].thermo;
+      if (!t) continue;
+      const [x0, y] = panel.toScreen((k - N) * A, t[0]), [x1] = panel.toScreen((k - N + 1) * A, 0);
+      ctx.strokeStyle = color || alertColor(t[2]);
+      ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(Math.max(x1, x0 + 1), y); ctx.stroke();
+    }
+  }
+}
+
 // Sound speed profile in the strip right of the vertical slice, on the same depth scale.
 function drawSVP(ctx, panel) {
   const p = panel.plot, x = p.x + p.w + 12, w = SIDE_W, v = panel.view;
@@ -679,8 +725,7 @@ function drawSVP(ctx, panel) {
     ctx.fillText('no SVP', x + w / 2, p.y + p.h / 2);
     return;
   }
-  // SVP depths are below the surface; shift them when depths are measured from the transducer.
-  const shift = s.referenceToSurface ? 0 : -(s.transducerDepth_m || 0);
+  const shift = svpShift();
   const pts = svp.depth_m.map((d, i) => [d + shift, svp.speed_mps[i]]);
   const inView = pts.filter(([d]) => d >= v.y0 && d <= v.y1);
   if (!inView.length) return;
@@ -689,10 +734,37 @@ function drawSVP(ctx, panel) {
   const pad = (hi - lo) * 0.1;
   lo -= pad; hi += pad;
   const sx = c => x + (c - lo) / (hi - lo) * w;
+  const speedStep = niceStep(hi - lo, w / 30), speedTicks = [];
+  for (let c = Math.ceil(lo / speedStep) * speedStep; c <= hi; c += speedStep) speedTicks.push(c);
   ctx.save();
   ctx.beginPath();
   ctx.rect(x, p.y, w, p.h);
   ctx.clip();
+  if (state.showGrid) {
+    // Depth lines at the vertical slice's ticks, speed lines at round values.
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const d of panel.ticks('y').values) {
+      const y = Math.round(panel.toScreen(0, d)[1]) + 0.5;
+      ctx.moveTo(x, y); ctx.lineTo(x + w, y);
+    }
+    for (const c of speedTicks) {
+      const gx = Math.round(sx(c)) + 0.5;
+      ctx.moveTo(gx, p.y); ctx.lineTo(gx, p.y + p.h);
+    }
+    ctx.stroke();
+  }
+  // The cast's thermocline (gradient at least half its maximum), shaded, with its bottom marked.
+  if (svp.thermocline_m) {
+    const [, yt] = panel.toScreen(0, svp.thermocline_m[0] + shift), [, yb] = panel.toScreen(0, svp.thermocline_m[1] + shift);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+    ctx.fillRect(x, yt, w, yb - yt);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath(); ctx.moveTo(x, yb); ctx.lineTo(x + w, yb); ctx.stroke();
+    ctx.setLineDash([]);
+  }
   // Velocline: the depth of the strongest sound speed gradient in view.
   let best = null;
   for (let i = 1; i < pts.length; i++) {
@@ -719,10 +791,31 @@ function drawSVP(ctx, panel) {
   ctx.restore();
   ctx.fillStyle = '#c9ced6';
   ctx.textBaseline = 'top';
-  ctx.textAlign = 'left';
-  ctx.fillText((lo + pad).toFixed(0), x, p.y + p.h + 4);
-  ctx.textAlign = 'right';
-  ctx.fillText((hi - pad).toFixed(0), x + w, p.y + p.h + 4);
+  // Label the outermost speed lines.
+  if (speedTicks.length) {
+    const first = speedTicks[0], last = speedTicks[speedTicks.length - 1];
+    ctx.textAlign = 'left';
+    ctx.fillText(first.toFixed(0), Math.max(x, sx(first) - 12), p.y + p.h + 4);
+    if (speedTicks.length > 1) {
+      ctx.textAlign = 'right';
+      ctx.fillText(last.toFixed(0), Math.min(x + w, sx(last) + 12), p.y + p.h + 4);
+    }
+  }
+  // Latest thermocline pick: its shift from the cast and the resulting outer-beam depth error.
+  const last = state.tracking === 'thermocline' && lastPick();
+  if (last) {
+    const [depth, ref, err] = last;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = alertColor(err);
+    if (ref === null) {
+      ctx.fillText('calibrating', x + w / 2, p.y + 4);
+    } else {
+      const moved = depth - ref;
+      ctx.fillText(`Δz ${moved >= 0 ? '+' : ''}${moved.toFixed(1)} m`, x + w / 2, p.y + 4);
+      ctx.fillText(err === null ? 'err n/a' : `err ${err.toFixed(2)} m`, x + w / 2, p.y + 18);
+      if (err !== null && Math.abs(err) > s.castAlertError_m) ctx.fillText('new cast?', x + w / 2, p.y + 32);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -827,8 +920,8 @@ document.getElementById('grid').addEventListener('change', ev => {
   state.showGrid = ev.target.checked;
   for (const p of Object.values(panels)) p.draw();
 });
-document.getElementById('layers').addEventListener('change', ev => {
-  state.showLayers = ev.target.checked;
+document.getElementById('tracking').addEventListener('change', ev => {
+  state.tracking = ev.target.value;
   panels.vertical.draw();
 });
 document.getElementById('colormap').addEventListener('change', ev => {
@@ -930,7 +1023,7 @@ function handleBinary(buf) {
     for (const [, len] of [...v, ...h]) { vals.push(payload.subarray(pos, pos + len)); pos += len; }
     for (let k = 0; k < count; k++) {
       state.columns.push({ t: times[k], vOff: v[k][0], v: vals[k], hOff: h[k][0], h: vals[count + k],
-                           layers: header.layers[k] });
+                           layers: header.layers[k], thermo: header.thermocline[k] });
     }
     const max = historyColumns();
     if (state.columns.length > max) state.columns.splice(0, state.columns.length - max);

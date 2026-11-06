@@ -83,7 +83,7 @@ Gridding follows the Qt version's geometry, with two bugs fixed.
 | --- | --- | --- |
 | Network | UDP address, port, multicast group, HTTP port | Command-line arguments |
 | Processing | cell size, reference to water surface, heave allowance, slice depth, slice thickness, across-track width, along-track average, ping history | Server: shared by all viewers |
-| Display | zoom, pan, auto-zoom, colour scale, pause | Browser: per viewer |
+| Display | zoom, pan, auto-zoom, color scale, pause | Browser: per viewer |
 
 Changing a processing setting applies to everyone, and every connected page shows the new value. Changing the cell size,
 depth reference, transducer depth (from #IIP) or the along-track average clears the history, since earlier data was gridded or averaged differently. Changing the slice settings applies to new data only.
@@ -102,9 +102,9 @@ for the whole history, or cut per viewer.
 - Axes in metres (depth, across-track) and pings (newest = 0 at the right; each column spans the along-track
   average). The Qt version's axes were in bin
   indices, which made a 10 m slice read as about 50.
-- Colour scale: an "Auto levels" checkbox (on by default) keeps each panel at the 10th to 90th percentile of its data,
-  smoothed so colours don't jump between updates. Setting a level by hand (histogram or min/max inputs) turns it off.
-- Each panel has a histogram of its values beside a colour bar, with draggable minimum and maximum lines (drag the band
+- Color scale: an "Auto levels" checkbox (on by default) keeps each panel at the 10th to 90th percentile of its data,
+  smoothed so colors don't jump between updates. Setting a level by hand (histogram or min/max inputs) turns it off.
+- Each panel has a histogram of its values beside a color bar, with draggable minimum and maximum lines (drag the band
   between them to move both). The histogram's value range is fixed when data first arrives, so it doesn't shift with
   each update; it widens only if a level is set outside it. Double-clicking the histogram resets its range and levels.
 - Plots auto-zoom to the data extent by default. An "Auto-zoom" checkbox keeps them fitted as data arrives; manual

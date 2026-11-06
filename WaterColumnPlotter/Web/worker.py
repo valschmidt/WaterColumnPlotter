@@ -22,11 +22,17 @@ from KMALL.kmall import kmall
 from WaterColumnPlotter.Web.gridding import (GridTooLarge, add_blocks, average, grid_mwc, horizontal_band,
                                              vertical_band)
 from WaterColumnPlotter.Web.layers import LayerTracker
+from WaterColumnPlotter.Web.thermocline import ThermoclineTracker, depth_error, svp_thermocline
 
 logger = logging.getLogger(__name__)
 
 # Settings whose change discards everything processed so far: the cell size and depth reference (which place data
 # in the grid), and the along-track averaging (which sets how many pings each slice column spans).
+# Thermocline tracking: a cast is compared with the picks that follow it if it arrived within this long of being
+# taken, using the median of this many picks as the reference.
+CAST_RECENT_S = 600.0
+CALIBRATION_PICKS = 10
+
 RESET_SETTINGS = ('binSize_m', 'alongTrackAvg_ping', 'referenceToSurface', 'transducerDepth_m', 'sidelobeSuppression')
 
 
@@ -48,6 +54,7 @@ class Worker:
     def __init__(self, settings):
         self.settings = dict(settings)
         self.km = kmall()
+        self.svp = None  # latest cast: {'depth', 'speed', 'top', 'bottom'} (depths below the surface)
         self.stats = {'processed': 0, 'no_bottom': 0, 'grid_too_large': 0, 'process_ms': 0.0}
         self.reset()
 
@@ -58,9 +65,11 @@ class Worker:
         self.recent = collections.deque(maxlen=s['alongTrackAvg_ping'])
         # Slice column being accumulated: {'pings': set of pingCnt, 'v': block, 'h': block, 'times': []}
         self.column = None
-        # Completed slice columns since the last update: (time, (v_off, v), (h_off, h), layers)
+        # Completed slice columns since the last update: (time, (v_off, v), (h_off, h), layers, thermocline)
         self.new_columns = []
         self.tracker = LayerTracker(min_level_db=s['layerMinLevel_dB'])
+        self.thermocline = ThermoclineTracker(threshold_db_per_m=s['thermoclineThreshold_dBpm'],
+                                              along_track_s=s['thermoclineWindow_s'])
         self.v_band = vertical_band(s)
         self.h_band = horizontal_band(s)
 
@@ -74,6 +83,8 @@ class Worker:
             self.v_band = vertical_band(new)
             self.h_band = horizontal_band(new)
             self.tracker.min_level_db = new['layerMinLevel_dB']
+            self.thermocline.threshold = new['thermoclineThreshold_dBpm']
+            self.thermocline.along_track_s = new['thermoclineWindow_s']
         return reset
 
     def finish_column(self):
@@ -81,9 +92,62 @@ class Worker:
         (v_off,), v = average(c['v'])
         (h_off,), h = average(c['h'])
         t = float(np.mean(c['times']))
-        layers = self.tracker.add_profile(t, (v_off + np.arange(len(v))) * self.settings['binSize_m'], v)
-        self.new_columns.append((t, (v_off, v), (h_off, h), layers))
+        b = self.settings['binSize_m']
+        depths = (v_off + np.arange(len(v))) * b
+        found = [z for z in c['seafloor'] if z is not None]
+        seafloor = min(found) if found else None
+        layers = self.tracker.add_profile(t, depths, v, seafloor)
+        self.new_columns.append((t, (v_off, v), (h_off, h), layers,
+                                 self.track_thermocline(t, v_off, depths, v, seafloor)))
         self.column = None
+
+    def set_svp(self, time, depth, speed):
+        """A new cast: returns its thermocline (top, bottom) below the surface, or None if none was found."""
+        found = svp_thermocline(depth, speed)
+        self.svp = None if found is None else {
+            'time': time, 'depth': depth, 'speed': speed, 'top': found[0], 'bottom': found[1],
+            'reference': None,  # depth below the surface the picks are compared with, once known
+            'calibration': []}  # picks since the cast arrived, while setting the reference
+        return found
+
+    def track_thermocline(self, t, v_off, depths, values, seafloor):
+        """
+        Pick the thermocline bottom in a vertical slice column and compare it with the last cast. Returns
+        [pick, reference, outer-beam depth error] (depths in the column's reference; reference and error None while
+        unknown), or None if there was no pick.
+
+        If the cast arrived as it was taken (cast time within CAST_RECENT_S of the data), the reference is the median
+        of the first CALIBRATION_PICKS picks after it, so the layer's movement since the cast is measured whatever its
+        offset from the thermocline. Otherwise the cast's own thermocline bottom is the reference (Cordero's
+        comparison), which assumes the layer marks the thermocline bottom.
+        """
+        s = self.settings
+        z0 = s['transducerDepth_m'] or 0.0
+        to_surface = 0.0 if s['referenceToSurface'] else z0  # add to column depths for depths below the surface
+        cast = self.svp
+        window = None
+        if cast is not None:
+            centre = cast['bottom'] - to_surface
+            window = (centre - s['thermoclineSearch_m'], centre + s['thermoclineSearch_m'])
+        pick = self.thermocline.add_profile(t, v_off, values, s['binSize_m'], window, seafloor)
+        if pick is None:
+            return None
+        if cast is None:
+            return [round(pick, 2), None, None]
+        if cast['reference'] is None:
+            if abs(t - cast['time']) > CAST_RECENT_S:
+                cast['reference'] = cast['bottom']
+            else:
+                cast['calibration'].append(pick + to_surface)
+                if len(cast['calibration']) < CALIBRATION_PICKS:
+                    return [round(pick, 2), None, None]
+                cast['reference'] = float(np.median(cast['calibration']))
+        reference = cast['reference'] - to_surface
+        err = None
+        if seafloor is not None:
+            err = depth_error(cast['depth'], cast['speed'], pick - reference, cast['top'], cast['bottom'],
+                              z0, seafloor + to_surface, s['castAlertAngle_deg'])
+        return [round(pick, 2), round(reference, 2), None if err is None else round(err, 3)]
 
     def process_installation(self, data):
         """
@@ -113,7 +177,11 @@ class Worker:
         if result is None:
             self.stats['no_bottom'] += 1
             return
-        sums, counts, row0, col0 = result
+        sums, counts, row0, col0, bottom = result
+        # The seafloor under the vertical slice: the shallowest bottom detection in its across-track band.
+        b = s['binSize_m']
+        in_band = (bottom[0] >= self.v_band[0] * b) & (bottom[0] < self.v_band[1] * b)
+        seafloor = float(bottom[1][in_band].min()) if in_band.any() else None
         block = ((row0, col0), sums, counts)
         ping = dg['cmnPart']['pingCnt']
 
@@ -129,13 +197,14 @@ class Worker:
         v = band_sum(sums, counts, (row0, col0), self.v_band, axis=1)  # per row, over the across-track band
         h = band_sum(sums, counts, (row0, col0), self.h_band, axis=0)  # per column, over the depth band
         if self.column is None:
-            self.column = {'pings': {ping}, 'v': v, 'h': h, 'times': [dg['header']['dgtime']]}
+            self.column = {'pings': {ping}, 'v': v, 'h': h, 'times': [dg['header']['dgtime']], 'seafloor': [seafloor]}
         else:
             c = self.column
             c['pings'].add(ping)
             c['v'] = add_blocks(c['v'], v)
             c['h'] = add_blocks(c['h'], h)
             c['times'].append(dg['header']['dgtime'])
+            c['seafloor'].append(seafloor)
 
         self.stats['processed'] += 1
         self.stats['process_ms'] = 0.9 * self.stats['process_ms'] + 0.1 * 1e3 * (time.perf_counter() - t0)
@@ -181,9 +250,11 @@ def run(settings, in_queue, settings_queue, out_queue, update_interval):
             elif item[4:8] == b'#SVP':
                 worker.km.OpenBytestoRead(item)
                 svp = worker.km.read_EMdgmSVP()
-                out_queue.put({'type': 'svp', 'time': svp['time_sec'],
-                               'depth_m': [round(float(d), 2) for d in svp['sensorData']['depth_m']],
-                               'speed_mps': [round(float(c), 2) for c in svp['sensorData']['soundVelocity_mPerSec']]})
+                depth = [round(float(d), 2) for d in svp['sensorData']['depth_m']]
+                speed = [round(float(c), 2) for c in svp['sensorData']['soundVelocity_mPerSec']]
+                found = worker.set_svp(svp['time_sec'], depth, speed)
+                out_queue.put({'type': 'svp', 'time': svp['time_sec'], 'depth_m': depth, 'speed_mps': speed,
+                               'thermocline_m': None if found is None else [round(z, 2) for z in found]})
             elif item[4:8] == b'#IIP':
                 depth = worker.process_installation(item)
                 if depth is not None:
