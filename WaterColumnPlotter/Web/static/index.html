@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Water Column Plotter</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header id="toolbar">
+    <span class="app-title">Water Column Plotter</span>
+    <button id="pause" type="button">Pause</button>
+    <label class="check"><input type="checkbox" id="autozoom" checked> Auto-zoom</label>
+    <button id="autolevels" type="button">Auto levels</button>
+    <button id="settings-toggle" type="button" aria-expanded="false" aria-controls="settings">Settings</button>
+    <span id="status" class="status">Connecting…</span>
+  </header>
+
+  <form id="settings" hidden>
+    <p class="note">Processing settings apply to everyone viewing this plotter.</p>
+    <div class="fields">
+      <label>Bin size <span class="unit">m</span><input name="binSize_m" type="number" step="any" min="0.01"></label>
+      <label>Max heave <span class="unit">m</span><input name="maxHeave_m" type="number" step="any" min="0"></label>
+      <label>Grid cells <span class="unit">per side</span><input name="maxGridCells" type="number" step="1" min="50"></label>
+      <label>Slice depth <span class="unit">m</span><input name="sliceDepth_m" type="number" step="any" min="0"></label>
+      <label>Slice thickness <span class="unit">m</span><input name="sliceThickness_m" type="number" step="any" min="0.01"></label>
+      <label>Across-track width <span class="unit">m</span><input name="acrossTrackAvg_m" type="number" step="any" min="0.01"></label>
+      <label>Along-track average <span class="unit">pings</span><input name="alongTrackAvg_ping" type="number" step="1" min="1"></label>
+      <label>History <span class="unit">columns</span><input name="historyColumns" type="number" step="1" min="10"></label>
+    </div>
+    <p class="note">Changing bin size, max heave or grid cells clears the display history.</p>
+    <button type="submit">Apply</button>
+  </form>
+
+  <main id="panels">
+    <section class="panel" id="pie">
+      <div class="panel-head">
+        <h2>Pie</h2>
+        <span class="readout"></span>
+        <span class="levels">
+          <input class="lo" type="number" step="any" aria-label="Colour scale minimum (dB)">
+          <span class="colorbar"></span>
+          <input class="hi" type="number" step="any" aria-label="Colour scale maximum (dB)"> dB
+        </span>
+      </div>
+      <canvas></canvas>
+    </section>
+    <section class="panel" id="horizontal">
+      <div class="panel-head">
+        <h2>Horizontal slice</h2>
+        <span class="readout"></span>
+        <span class="levels">
+          <input class="lo" type="number" step="any" aria-label="Colour scale minimum (dB)">
+          <span class="colorbar"></span>
+          <input class="hi" type="number" step="any" aria-label="Colour scale maximum (dB)"> dB
+        </span>
+      </div>
+      <canvas></canvas>
+    </section>
+    <section class="panel" id="vertical">
+      <div class="panel-head">
+        <h2>Vertical slice</h2>
+        <span class="readout"></span>
+        <span class="levels">
+          <input class="lo" type="number" step="any" aria-label="Colour scale minimum (dB)">
+          <span class="colorbar"></span>
+          <input class="hi" type="number" step="any" aria-label="Colour scale maximum (dB)"> dB
+        </span>
+      </div>
+      <canvas></canvas>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

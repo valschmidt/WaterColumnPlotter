@@ -2,3 +2,4 @@ numpy~=2.5
 pykmall>=1.1.2
 PyQt5~=5.15.11
 pyqtgraph~=0.14.0
+aiohttp~=3.14

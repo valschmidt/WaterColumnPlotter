@@ -10,6 +10,7 @@ authors = [{ name = "Lynette Davis", email = "ldavis@ccom.unh.edu" }]
 keywords = ["hydrography", "ocean mapping", "sonar", "hydrographic survey", "water column"]
 requires-python = ">=3.10"
 dependencies = [
+    "aiohttp>=3.9",
     "numpy>=2.0",
     "pykmall>=1.1.2",
     "PyQt5>=5.15",
@@ -30,9 +31,13 @@ Homepage = "https://github.com/monsterkittykitty/WaterColumnPlotter"
 [project.gui-scripts]
 water_column_plotter = "WaterColumnPlotter.GUI.GUI_Main:main"
 
+[project.scripts]
+water_column_plotter_web = "WaterColumnPlotter.Web.app:main"
+
 [tool.setuptools.packages.find]
 include = ["WaterColumnPlotter*"]
 
 [tool.setuptools.package-data]
 "WaterColumnPlotter.GUI.Settings" = ["*.json"]
 "WaterColumnPlotter.GUI.Dialogs.UIFiles" = ["*.ui"]
+"WaterColumnPlotter.Web.static" = ["*.html", "*.js", "*.css"]
