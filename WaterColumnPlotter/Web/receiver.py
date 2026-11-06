@@ -1,6 +1,6 @@
 """
 UDP receiver: reads Kongsberg datagrams from a socket, reassembles partitioned #MWC datagrams, and puts each
-complete datagram (bytes) on a queue. Runs in its own process and does nothing else, so it keeps up with the sonar.
+complete #MWC datagram, and any #IIP (installation parameters), on a queue. Runs in its own process and does nothing else, so it keeps up with the sonar.
 """
 
 import logging
@@ -73,7 +73,9 @@ def run(bind_ip, port, multicast_group, out_queue, rcvbuf=8 * 2 ** 20):
             data = None
         now = time.monotonic()
 
-        if data and data[4:8] == b'#MWC':
+        if data and data[4:8] == b'#IIP':  # Installation parameters: the transducer depth is taken from these.
+            out_queue.put(data)
+        elif data and data[4:8] == b'#MWC':
             stats['packets'] += 1
             km.OpenBytestoRead(data)
             header = km.read_EMdgmHeader()

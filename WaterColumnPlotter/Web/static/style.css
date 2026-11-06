@@ -56,18 +56,32 @@ button[aria-pressed="true"] { background: var(--accent); color: #0b1220; }
 .status.error { color: var(--error); }
 
 #settings {
-  padding: 8px 12px 10px;
+  padding: 6px 12px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
 }
-#settings .fields {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 6px 16px;
-  margin: 6px 0;
+#settings .groups {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
 }
+#settings fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 2px 8px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+#settings legend { padding: 0 4px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
 #settings label { display: flex; align-items: center; gap: 6px; }
-#settings label input { margin-left: auto; width: 80px; }
+#settings label input { margin-left: auto; width: 70px; }
+.swatch { display: inline-block; width: 12px; height: 3px; border-top: 2px dashed; }
+.swatch.h { color: rgb(255, 92, 220); }
+.swatch.v { color: rgb(80, 220, 255); }
+#settings button[type="submit"] { align-self: flex-end; }
 .unit { color: var(--muted); }
 .note { margin: 2px 0; color: var(--muted); }
 
@@ -119,7 +133,6 @@ input[type="number"] {
 .readout { flex: 1; color: var(--muted); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; }
 .levels { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
 .levels input { width: 58px; }
-.colorbar { display: inline-block; width: 80px; height: 10px; border-radius: 2px; }
 
 .panel canvas {
   flex: 1;
@@ -138,3 +151,4 @@ input[type="number"] {
     overflow-y: auto;
   }
 }
+#settings label input[type="checkbox"] { width: auto; }

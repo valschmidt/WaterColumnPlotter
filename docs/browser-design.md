@@ -39,37 +39,58 @@ Sonar / SIS / KmallPlayer --UDP--> receiver process: socket reads, partition rea
 
 Gridding follows the Qt version's geometry, with two bugs fixed.
 
-- Each #MWC datagram is one column in the slices. (For dual-swath systems that is two columns per ping.)
+- Pings are identified by `pingCnt`. Dual-swath systems send one #MWC datagram per swath; swaths of the same ping
+  are combined.
 - Each water column sample is placed in a 2D grid (depth z by across-track y) with square cells of `binSize_m`:
   - range `r = (startRangeSampleNum + i) * soundVelocity / (2 * sampleFreq)`
   - `y = r * sin(beamPointAngReVertical)`. Positive angles are to port (beam 0, the port-most beam, has the
     largest positive angle), and port is drawn on the left.
   - `z = r * cos(tiltAngleReTx) * cos(beamPointAngReVertical) + heave`
   - Samples beyond each beam's bottom detect are dropped. Beams with no bottom detect use the swath's mean detect.
-  - The grid's top edge is `-maxHeave_m`, so z = 0 is row `maxHeave_m / binSize_m`.
+  - Heave: `heave_m` is added to every sample's depth, as in the Qt version. (Checked on a REV I file: adding it
+    reduces ping-to-ping jitter of the nadir seafloor from 3.0 to 1.9 cm; subtracting it raises it to 5.1 cm.)
+  - Depth reference: by default depth is measured from the transducer's resting (heave-corrected) depth. With
+    "Reference to water surface", the transducer's depth below the waterline is added. That depth is read from the
+    #IIP installation datagram with pykmall's `read_EMdgmIIP(translate=True)`: transmit transducer z
+    (`tx_transducer_1_vertical_location`, or `transducer_1_vertical_location` for a combined head) minus waterline
+    z (`waterline_vertical_location`). Until an #IIP arrives the depth is unknown and the page says so; a live feed
+    may not send one after the plotter starts.
+  - Cells are indexed from depth 0: row `floor(z / binSize_m)`, column `floor(y / binSize_m)`. Each ping is
+    gridded into a block just large enough for its samples, with the index of its first row and column, so there is
+    no fixed grid size, no samples are dropped at grid edges, and deeper water or a wider swath simply extends the
+    plots. The Qt version's fixed 500 x 500 grid is gone. Its "max heave" setting only offset the array index so
+    heave-raised samples (negative depth) could be stored; here it is a display setting, "heave allowance": when depth
+    is measured from the transducer, the pie and vertical slice start that far above 0 m so those samples stay
+    visible. Referenced to the water surface, they start at 0 m.
+  - Safeguard: a ping whose block would exceed 2 million cells (a cell size far too small for the swath) is skipped,
+    and the page's status line says so.
 - Amplitude is `sampleAmplitude05dB_p * 0.5 - TVGoffset_dB`. Each cell holds the sum and count of the samples in
   it, so averages are sum / count.
 - **Fixed:** the Qt version accumulated with `grid[idx] += amp`, which NumPy applies once per cell even when
   indices repeat. The cell therefore held a single sample, not the sum and count. We use `np.bincount`.
 - **Fixed:** beams with fewer samples than the bottom-detect range were padded with NaN, and the NaNs were added
   into the grid, erasing those cells. We only use samples that exist.
-- **Pie**: average of the last `alongTrackAvg_ping` gridded datagrams.
+- **Pie**: average of the last `alongTrackAvg_ping` pings.
 - **Vertical slice column**: per depth row, average over the across-track band `|y| <= acrossTrackAvg_m / 2`.
 - **Horizontal slice column**: per across-track column, average over the depth band
   `sliceDepth_m ± sliceThickness_m / 2`.
-- Slice columns are averaged along track in blocks of `alongTrackAvg_ping` datagrams, as in the Qt version.
+- Slice columns are averaged along track in blocks of `alongTrackAvg_ping` pings. (The Qt version used blocks of
+  datagrams, so with dual-swath data a column spanned half as many pings as the setting said.)
 
 ## Settings
 
 | Kind | Settings | Scope |
 | --- | --- | --- |
 | Network | UDP address, port, multicast group, HTTP port | Command-line arguments |
-| Processing | bin size, max heave, slice depth, slice thickness, across-track width, along-track average | Server: shared by all viewers |
+| Processing | cell size, reference to water surface, heave allowance, slice depth, slice thickness, across-track width, along-track average, ping history | Server: shared by all viewers |
 | Display | zoom, pan, auto-zoom, colour scale, pause | Browser: per viewer |
 
-Changing a processing setting applies to everyone, and every connected page shows the new value. Changing bin size or
-max heave clears the history, since earlier data was gridded differently. Changing the slice settings applies to new
-data only.
+Changing a processing setting applies to everyone, and every connected page shows the new value. Changing the cell size,
+depth reference, transducer depth (from #IIP) or the along-track average clears the history, since earlier data was gridded or averaged differently. Changing the slice settings applies to new data only.
+
+The settings form groups settings by the plot they affect (pie grid, horizontal slice, vertical slice, all plots),
+with explanations in tooltips. Names in the form versus the settings keys: cell size = `binSize_m`,
+ping history = `historyPings`.
 
 Possible later change: keep each datagram's grid (cropped to its data, roughly 0.3 MB) so slices can be recomputed
 for the whole history, or cut per viewer.
@@ -78,14 +99,20 @@ for the whole history, or cut per viewer.
 
 - Fixed layout: pie upper left, horizontal slice upper right, vertical slice across the full bottom. Panels resize
   with the window and never overlap.
-- Axes in metres (depth, across-track) and pings (newest = 0 at the right). The Qt version's axes were in bin
+- Axes in metres (depth, across-track) and pings (newest = 0 at the right; each column spans the along-track
+  average). The Qt version's axes were in bin
   indices, which made a 10 m slice read as about 50.
-- Colour scale defaults to the 10th to 90th percentile of valid values. An "Auto levels" button recomputes it, and
-  each panel has min/max inputs.
+- Colour scale: an "Auto levels" checkbox (on by default) keeps each panel at the 10th to 90th percentile of its data,
+  smoothed so colours don't jump between updates. Setting a level by hand (histogram or min/max inputs) turns it off.
+- Each panel has a histogram of its values beside a colour bar, with draggable minimum and maximum lines (drag the band
+  between them to move both). The histogram's value range is fixed when data first arrives, so it doesn't shift with
+  each update; it widens only if a level is set outside it. Double-clicking the histogram resets its range and levels.
 - Plots auto-zoom to the data extent by default. An "Auto-zoom" checkbox keeps them fitted as data arrives; manual
   zoom (wheel) or pan (drag) turns it off.
-- Pie and vertical slice: 0 m depth stays at the top at every zoom level.
-- Horizontal and vertical slices: with auto-zoom on, the newest ping stays at the right edge.
+- Pie and vertical slice: the top stays fixed at every zoom level: 0 m (water surface) when referenced to the
+  surface, otherwise the heave allowance above 0 m.
+- Horizontal and vertical slices: with auto-zoom on, the x-axis spans the full history and the newest ping stays at
+  the right edge, so new data scrolls in from the right at a constant scale.
 - The horizontal slice's depth band and the vertical slice's across-track band are drawn on the pie.
 - Controls are labelled "Slice depth" and "Slice thickness" (the Qt version's "Depth" and "Depth avg").
 - Cursor readout: position and value under the mouse.
@@ -94,12 +121,17 @@ for the whole history, or cut per viewer.
 
 - On connect, the server sends the settings, the current pie and the slice history.
 - Then once per update interval (default 1 s), it sends the new pie and only the slice columns added since the last
-  update. Each browser keeps its own slice history (default 1000 columns).
+  update. Each browser keeps its own slice history (default 2500 pings).
 - Binary WebSocket frames: a small JSON header (type, shape, geometry) followed by float32 data, NaN for empty cells.
+  Each slice column covers only its data and carries the grid index of its first value.
   The pie is cropped to its data extent. At 18 datagrams/s with along-track averaging of 5, that is about 30 kB/s per
   viewer plus the pie (about 0.2 MB per update).
 
 ## Open questions
+
+- Depth reference to the water surface ignores tide and squat; it is not referenced to a datum.
+- Default cell size: 0.2 m is a fixed default. It could be chosen from the data (for example from the range
+  resolution and depth).
 
 - Positions and attitude: the Qt version ignores #SKM/#SPO. Pitch could correct the along-track tilt, and positions
   could label the slices.

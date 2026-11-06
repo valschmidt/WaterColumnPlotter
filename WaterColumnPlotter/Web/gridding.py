@@ -1,28 +1,36 @@
 """
 Gridding of Kongsberg #MWC water column datagrams, and the slice geometry used for display.
 
-Grid layout (n x n cells of bin_size metres):
-- Row r covers depth [(r - heave_rows) * bin_size, (r - heave_rows + 1) * bin_size), where
-  heave_rows = round(max_heave / bin_size); depth is positive down from the transducer.
-- Column c covers across-track [(c - n // 2) * bin_size, (c - n // 2 + 1) * bin_size), starboard positive,
-  so port is on the left (low column index).
+Cells are square, bin_size metres on a side:
+- row r covers depth [r * bin_size, (r + 1) * bin_size), depth positive down, measured from the transducer's resting
+  (heave-corrected) depth, or from the water surface when a depth offset (the transducer's depth) is given. Rows can
+  be negative: heave can raise samples above the transducer's resting depth;
+- column c covers across-track [c * bin_size, (c + 1) * bin_size), starboard positive, so port is on the left.
+
+Each ping is gridded into a block just large enough for its samples, given with the index of its first row and
+column, so no grid size has to be chosen and no samples are dropped.
 """
 
 import itertools
 
 import numpy as np
 
+# Largest block one datagram may be gridded into. A cell size that is very small for the swath would otherwise use
+# a great deal of memory.
+MAX_CELLS = 2_000_000
 
-def heave_rows(bin_size, max_heave):
-    """Number of grid rows above 0 m depth, reserved for upward heave."""
-    return int(round(max_heave / bin_size))
+
+class GridTooLarge(Exception):
+    pass
 
 
-def grid_mwc(dg, bin_size, max_heave, n):
+def grid_mwc(dg, bin_size, depth_offset=0.0):
     """
-    Grid one #MWC datagram (as returned by pykmall's kmall.read_EMdgmMWC()).
-    :return: (sums, counts, num_outside): n x n arrays of summed amplitude (dB) and sample count per cell, and the
-    number of samples that fell outside the grid. Returns None if the ping has no bottom detections.
+    Grid one #MWC datagram (as returned by pykmall's kmall.read_EMdgmMWC()). depth_offset (m) is added to every
+    depth: the transducer's depth below the waterline, to reference depths to the water surface.
+    :return: (sums, counts, row0, col0): 2D arrays of summed amplitude (dB) and sample count per cell, and the
+    row and column index of their first cell. Returns None if the ping has no bottom detections.
+    :raises GridTooLarge: if the block would exceed MAX_CELLS cells.
     """
     beam = dg['beamData']
     det = np.asarray(beam['detectedRangeInSamples'], dtype=np.int64)
@@ -58,31 +66,56 @@ def grid_mwc(dg, bin_size, max_heave, n):
                       [np.asarray(beam['beamTxSectorNum'])])
     # Kongsberg beam angles are positive to port; across-track here is positive to starboard.
     across = sample_range * (-np.sin(beam_angle))[beam_index]
-    depth = sample_range * (np.cos(tilt) * np.cos(beam_angle))[beam_index] + np.float32(dg['txInfo']['heave_m'])
+    depth = sample_range * (np.cos(tilt) * np.cos(beam_angle))[beam_index] \
+        + np.float32(dg['txInfo']['heave_m'] + depth_offset)
 
-    col = np.floor(across / bin_size).astype(np.int64) + n // 2
-    row = np.floor(depth / bin_size).astype(np.int64) + heave_rows(bin_size, max_heave)
-    inside = (col >= 0) & (col < n) & (row >= 0) & (row < n)
+    col = np.floor(across / bin_size).astype(np.int64)
+    row = np.floor(depth / bin_size).astype(np.int64)
+    row0, col0 = int(row.min()), int(col.min())
+    nrows, ncols = int(row.max()) - row0 + 1, int(col.max()) - col0 + 1
+    if nrows * ncols > MAX_CELLS:
+        raise GridTooLarge(f"{nrows} x {ncols} cells")
 
-    cell = row[inside] * n + col[inside]
-    sums = np.bincount(cell, weights=amplitudes[inside], minlength=n * n).reshape(n, n)
-    counts = np.bincount(cell, minlength=n * n).reshape(n, n)
-    return sums, counts, int(total - inside.sum())
+    cell = (row - row0) * ncols + (col - col0)
+    sums = np.bincount(cell, weights=amplitudes, minlength=nrows * ncols).reshape(nrows, ncols)
+    counts = np.bincount(cell, minlength=nrows * ncols).reshape(nrows, ncols)
+    return sums, counts, row0, col0
 
 
 def vertical_band(settings):
-    """Grid columns [c0, c1) averaged for the vertical slice: across-track within +/- acrossTrackAvg_m / 2."""
-    n, b = settings['maxGridCells'], settings['binSize_m']
-    half = max(1, int(round(settings['acrossTrackAvg_m'] / 2 / b)))
-    return max(0, n // 2 - half), min(n, n // 2 + half)
+    """Columns [c0, c1) averaged for the vertical slice: across-track within +/- acrossTrackAvg_m / 2."""
+    b = settings['binSize_m']
+    half = settings['acrossTrackAvg_m'] / 2
+    c0 = int(np.floor(-half / b))
+    return c0, max(c0 + 1, int(np.ceil(half / b)))
 
 
 def horizontal_band(settings):
-    """Grid rows [r0, r1) averaged for the horizontal slice: sliceDepth_m +/- sliceThickness_m / 2."""
-    n, b = settings['maxGridCells'], settings['binSize_m']
-    h = heave_rows(b, settings['maxHeave_m'])
-    top = settings['sliceDepth_m'] - settings['sliceThickness_m'] / 2
-    bottom = settings['sliceDepth_m'] + settings['sliceThickness_m'] / 2
-    r0 = h + int(np.floor(top / b))
-    r1 = max(r0 + 1, h + int(np.ceil(bottom / b)))
-    return max(0, r0), min(n, r1)
+    """Rows [r0, r1) averaged for the horizontal slice: sliceDepth_m +/- sliceThickness_m / 2."""
+    b = settings['binSize_m']
+    r0 = int(np.floor((settings['sliceDepth_m'] - settings['sliceThickness_m'] / 2) / b))
+    return r0, max(r0 + 1, int(np.ceil((settings['sliceDepth_m'] + settings['sliceThickness_m'] / 2) / b)))
+
+
+def add_blocks(a, b):
+    """
+    Sum two blocks that may cover different index ranges. A block is (offsets, sums, counts), where offsets gives
+    the index of the first element along each axis. Returns a block covering both.
+    """
+    (off_a, sa, ca), (off_b, sb, cb) = a, b
+    lo = [min(x, y) for x, y in zip(off_a, off_b)]
+    hi = [max(x + n, y + m) for x, y, n, m in zip(off_a, off_b, sa.shape, sb.shape)]
+    sums = np.zeros([h - l for l, h in zip(lo, hi)])
+    counts = np.zeros(sums.shape, dtype=np.int64)
+    for off, s, c in ((off_a, sa, ca), (off_b, sb, cb)):
+        idx = tuple(slice(o - l, o - l + n) for o, l, n in zip(off, lo, s.shape))
+        sums[idx] += s
+        counts[idx] += c
+    return tuple(lo), sums, counts
+
+
+def average(block):
+    """(offsets, sums, counts) -> (offsets, float32 averages with NaN where there is no data)."""
+    off, sums, counts = block
+    with np.errstate(invalid='ignore', divide='ignore'):
+        return off, (sums / counts).astype(np.float32)

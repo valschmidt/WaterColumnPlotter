@@ -11,26 +11,40 @@
   <header id="toolbar">
     <span class="app-title">Water Column Plotter</span>
     <button id="pause" type="button">Pause</button>
-    <label class="check"><input type="checkbox" id="autozoom" checked> Auto-zoom</label>
-    <button id="autolevels" type="button">Auto levels</button>
+    <label class="check" title="Fit the plots to the data as it arrives. Zooming or panning by hand turns this off; double-click a plot to turn it back on."><input type="checkbox" id="autozoom" checked> Auto-zoom</label>
+    <label class="check" title="Keep each plot's colour scale at the 10th to 90th percentile of its data. Adjusting a scale by hand turns this off."><input type="checkbox" id="autolevels" checked> Auto levels</label>
     <button id="settings-toggle" type="button" aria-expanded="false" aria-controls="settings">Settings</button>
     <span id="status" class="status">Connecting…</span>
   </header>
 
-  <form id="settings" hidden>
-    <p class="note">Processing settings apply to everyone viewing this plotter.</p>
-    <div class="fields">
-      <label>Bin size <span class="unit">m</span><input name="binSize_m" type="number" step="any" min="0.01"></label>
-      <label>Max heave <span class="unit">m</span><input name="maxHeave_m" type="number" step="any" min="0"></label>
-      <label>Grid cells <span class="unit">per side</span><input name="maxGridCells" type="number" step="1" min="50"></label>
-      <label>Slice depth <span class="unit">m</span><input name="sliceDepth_m" type="number" step="any" min="0"></label>
-      <label>Slice thickness <span class="unit">m</span><input name="sliceThickness_m" type="number" step="any" min="0.01"></label>
-      <label>Across-track width <span class="unit">m</span><input name="acrossTrackAvg_m" type="number" step="any" min="0.01"></label>
-      <label>Along-track average <span class="unit">pings</span><input name="alongTrackAvg_ping" type="number" step="1" min="1"></label>
-      <label>History <span class="unit">columns</span><input name="historyColumns" type="number" step="1" min="10"></label>
+  <form id="settings" hidden title="Processing settings are shared: changing them changes the display for everyone viewing this plotter.">
+    <div class="groups">
+      <fieldset>
+        <legend title="Each sample is placed in a grid of square cells, the same size across-track and in depth. The grid grows to cover the data.">Pie grid</legend>
+        <label title="Size of the square grid cells, across-track and in depth: the resolution of all three plots.">Cell size <span class="unit">m</span><input name="binSize_m" type="number" step="any" min="0.01"></label>
+      </fieldset>
+      <fieldset>
+        <legend title="Depths are heave-corrected and measured from the transducer, or from the water surface.">Depth</legend>
+        <label class="check" title="Measure depth from the water surface by adding the transducer's depth below the waterline, read from the sonar's installation datagram (#IIP). Applies immediately, for everyone.">Reference to water surface <input name="referenceToSurface" type="checkbox"></label>
+        <span class="unit" id="transducer-depth"></span>
+      </fieldset>
+      <fieldset>
+        <legend title="A plan view over time of one depth layer (magenta band on the pie)."><span class="swatch h"></span>Horizontal slice</legend>
+        <label title="Centre depth of the layer averaged into each column.">Slice depth <span class="unit">m</span><input name="sliceDepth_m" type="number" step="any" min="0"></label>
+        <label title="Thickness of the layer: the slice averages slice depth ± thickness / 2.">Slice thickness <span class="unit">m</span><input name="sliceThickness_m" type="number" step="any" min="0.01"></label>
+      </fieldset>
+      <fieldset>
+        <legend title="A depth profile over time (cyan band on the pie)."><span class="swatch v"></span>Vertical slice</legend>
+        <label title="Width of the band, centred under the vessel, averaged into each column.">Across-track width <span class="unit">m</span><input name="acrossTrackAvg_m" type="number" step="any" min="0.01"></label>
+      </fieldset>
+      <fieldset>
+        <legend>All plots</legend>
+        <label title="The pie shows the average of this many recent pings, and each slice column averages this many pings.">Along-track average <span class="unit">pings</span><input name="alongTrackAvg_ping" type="number" step="1" min="1"></label>
+        <label title="When depth is measured from the transducer, the pie and vertical slice start this far above 0 m, so data raised above the transducer by heave stays visible.">Heave allowance <span class="unit">m</span><input name="heaveAllowance_m" type="number" step="any" min="0"></label>
+        <label title="Number of pings shown in the slices.">Ping history<input name="historyPings" type="number" step="1" min="10"></label>
+      </fieldset>
+      <button type="submit" title="Applies to everyone viewing this plotter. Changing the cell size, depth reference or along-track average clears the slice history.">Apply</button>
     </div>
-    <p class="note">Changing bin size, max heave or grid cells clears the display history.</p>
-    <button type="submit">Apply</button>
   </form>
 
   <main id="panels">
@@ -39,8 +53,7 @@
         <h2>Pie</h2>
         <span class="readout"></span>
         <span class="levels">
-          <input class="lo" type="number" step="any" aria-label="Colour scale minimum (dB)">
-          <span class="colorbar"></span>
+          <input class="lo" type="number" step="any" aria-label="Colour scale minimum (dB)"> to
           <input class="hi" type="number" step="any" aria-label="Colour scale maximum (dB)"> dB
         </span>
       </div>
@@ -51,8 +64,7 @@
         <h2>Horizontal slice</h2>
         <span class="readout"></span>
         <span class="levels">
-          <input class="lo" type="number" step="any" aria-label="Colour scale minimum (dB)">
-          <span class="colorbar"></span>
+          <input class="lo" type="number" step="any" aria-label="Colour scale minimum (dB)"> to
           <input class="hi" type="number" step="any" aria-label="Colour scale maximum (dB)"> dB
         </span>
       </div>
@@ -63,8 +75,7 @@
         <h2>Vertical slice</h2>
         <span class="readout"></span>
         <span class="levels">
-          <input class="lo" type="number" step="any" aria-label="Colour scale minimum (dB)">
-          <span class="colorbar"></span>
+          <input class="lo" type="number" step="any" aria-label="Colour scale minimum (dB)"> to
           <input class="hi" type="number" step="any" aria-label="Colour scale maximum (dB)"> dB
         </span>
       </div>
