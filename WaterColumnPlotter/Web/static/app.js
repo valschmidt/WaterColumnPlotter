@@ -49,6 +49,8 @@ const SLICE_V_COLOR = 'rgba(80, 220, 255, 0.9)';   // vertical slice band (acros
 // ---------------------------------------------------------------------------
 const state = {
   settings: null,
+  hBand: null,         // the horizontal slice's band when last seen, to notice changes
+  hMode: 'amplitude',  // horizontal slice: 'amplitude', or the amplitude-weighted 'depth' in its band ('shaded': hillshaded)
   grid: null,          // slice bands as grid indices: {vertical: [c0, c1] columns, horizontal: [r0, r1] rows}
   pie: null,           // {data, rows, cols, row0, col0}
   columns: [],         // [{t, vOff, v, hOff, h, layers: [[id, top, bottom]]}], oldest first; offsets are grid indices
@@ -151,7 +153,9 @@ class Panel {
     this.histDrag = null;   // {which: 'lo' | 'hi' | 'both', range, start, levels} while dragging a level
     this.image = null;      // {w, h, data, x0, x1, y0, y1, extent: {x0, x1, y0, y1}}
     this.bitmap = document.createElement('canvas');
-    this.levels = null;     // [lo, hi] dB
+    this.levels = null;     // [lo, hi] in the plot's unit
+    this.unitLabel = this.el.querySelector('.unit-label');
+    this.setUnit('dB');
     this.view = null;       // {x0, x1, y0, y1} world coordinates shown
     this.autoZoom = true;   // keep the view fitted to the data as it arrives
     this.autoZoomButton = this.el.querySelector('.autozoom');
@@ -172,6 +176,22 @@ class Panel {
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     if (this.autoZoom) this.fit();
     this.draw();
+  }
+
+  // The unit of the plotted values (dB, or m for depths), for the color scale and readout.
+  setUnit(unit) {
+    this.unit = unit;
+    this.reversed = unit === 'm';  // depths: deeper (larger) values get the low end of the color map
+    this.unitLabel.textContent = unit;
+    this.loInput.setAttribute('aria-label', `Color scale minimum (${unit})`);
+    this.hiInput.setAttribute('aria-label', `Color scale maximum (${unit})`);
+  }
+
+  // Forget the color scale and histogram range, for values on a different scale.
+  resetLevels() {
+    this.levels = null;
+    this.histRangeFixed = null;
+    this.hist = null;
   }
 
   setAutoZoom(on) {
@@ -199,11 +219,13 @@ class Panel {
   setImage(image) {
     this.image = image;
     if (!image) { this.hist = null; this.draw(); return; }
-    if (!this.histRangeFixed) this.histRangeFixed = histogramRange(image.data);
+    if (!this.histRangeFixed) this.histRangeFixed = this.defaultRange(image.data);
     this.hist = this.histRangeFixed && histogram(image.data, this.histRangeFixed);
     if (!this.levels) this.autoLevels(false);
     else if (state.autoLevels && !this.histDrag) this.autoLevels(false, true);
-    this.colorize();
+    // Too few values for percentiles (an image that is still almost empty): span the histogram's range.
+    if (!this.levels && this.histRangeFixed) this.setLevels([this.histRangeFixed.lo, this.histRangeFixed.hi], false);
+    if (this.levels) this.colorize();
     if (this.autoZoom || !this.view) this.fit();
     this.draw();
   }
@@ -222,8 +244,19 @@ class Panel {
     }
   }
 
+  // The histogram's value range: the only values possible, if the panel knows them (valueRange), else the data's.
+  defaultRange(data) {
+    return (this.valueRange && this.valueRange()) || histogramRange(data);
+  }
+
   // manual: set by the user (histogram or inputs), which turns off auto levels.
   setLevels(levels, redraw = true, manual = false) {
+    const fixed = this.valueRange && this.valueRange();
+    if (fixed) {
+      // Nothing lies outside it; if the data does (from before the range changed), span the whole range.
+      levels = [Math.max(levels[0], fixed.lo), Math.min(levels[1], fixed.hi)];
+      if (!(levels[0] < levels[1])) levels = [fixed.lo, fixed.hi];
+    }
     if (!Number.isFinite(levels[0]) || !Number.isFinite(levels[1]) || levels[0] >= levels[1]) return;
     if (manual) setAutoLevels(false);
     this.levels = levels;
@@ -234,13 +267,14 @@ class Panel {
       this.histRangeFixed = { lo: Math.min(r.lo, levels[0] - pad), hi: Math.max(r.hi, levels[1] + pad) };
       if (this.image) this.hist = histogram(this.image.data, this.histRangeFixed);
     }
-    this.loInput.value = levels[0].toFixed(1);
-    this.hiInput.value = levels[1].toFixed(1);
+    const decimals = this.unit === 'm' ? 2 : 1;
+    this.loInput.value = levels[0].toFixed(decimals);
+    this.hiInput.value = levels[1].toFixed(decimals);
     if (redraw && this.image) { this.colorize(); this.draw(); }
   }
 
   colorize() {
-    const { w, h, data } = this.image;
+    const { w, h, data, shade } = this.image;
     const [lo, hi] = this.levels;
     const scale = 255 / (hi - lo);
     this.bitmap.width = w;
@@ -251,9 +285,11 @@ class Panel {
     for (let i = 0; i < data.length; i++) {
       const v = data[i];
       if (Number.isNaN(v)) continue;  // transparent: no data
-      const k = Math.max(0, Math.min(255, Math.round((v - lo) * scale))) * 3;
+      const t = Math.max(0, Math.min(255, Math.round((v - lo) * scale)));
+      const k = (this.reversed ? 255 - t : t) * 3;
       const j = i * 4;
-      px[j] = LUT[k]; px[j + 1] = LUT[k + 1]; px[j + 2] = LUT[k + 2]; px[j + 3] = 255;
+      const f = shade ? shade[i] : 1;  // hillshading: 1 lit, smaller in shadow
+      px[j] = LUT[k] * f; px[j + 1] = LUT[k + 1] * f; px[j + 2] = LUT[k + 2] * f; px[j + 3] = 255;
     }
     bctx.putImageData(img, 0, 0);
   }
@@ -323,7 +359,7 @@ class Panel {
     c.addEventListener('dblclick', ev => {
       if (this.inHist(ev.offsetX, ev.offsetY)) {
         // Reset this plot's histogram range and color scale to their defaults.
-        if (this.image) this.histRangeFixed = histogramRange(this.image.data);
+        if (this.image) this.histRangeFixed = this.defaultRange(this.image.data);
         if (this.histRangeFixed) this.hist = histogram(this.image.data, this.histRangeFixed);
         this.autoLevels();
       } else {
@@ -423,7 +459,8 @@ class Panel {
     // Color bar: values below the minimum get the lowest color, above the maximum the highest.
     for (let y = 0; y < a.h; y += 2) {
       const t = (this.yToValue(a.y + y, range) - lo) / (hi - lo);
-      const k = Math.max(0, Math.min(255, Math.round(t * 255))) * 3;
+      const u = Math.max(0, Math.min(255, Math.round(t * 255)));
+      const k = (this.reversed ? 255 - u : u) * 3;
       ctx.fillStyle = `rgb(${LUT[k]},${LUT[k + 1]},${LUT[k + 2]})`;
       ctx.fillRect(a.barX, a.y + y, a.barW, 2);
     }
@@ -441,7 +478,7 @@ class Panel {
       ctx.lineTo(a.barX + a.barW + 8, y + 4);
       ctx.fill();
       ctx.fillStyle = '#e3e6eb';
-      ctx.fillText(v.toFixed(0), a.x + 2, y - 2);
+      ctx.fillText(v.toFixed(this.unit === 'm' ? 1 : 0), a.x + 2, y - 2);
     }
     ctx.strokeStyle = '#4a505c';
     ctx.strokeRect(a.x + 0.5, a.y + 0.5, a.w - 1, a.h - 1);
@@ -466,7 +503,7 @@ class Panel {
     if (sx < p.x || sx > p.x + p.w || sy < p.y || sy > p.y + p.h) { this.readout.textContent = ''; return; }
     const [x, y] = this.toWorld(sx, sy);
     const v = this.valueAt(x, y);
-    this.readout.textContent = this.describe(x, y) + (Number.isFinite(v) ? `   ${v.toFixed(1)} dB` : '');
+    this.readout.textContent = this.describe(x, y) + (Number.isFinite(v) ? `   ${v.toFixed(this.unit === 'm' ? 2 : 1)} ${this.unit}` : '');
   }
 
   draw() {
@@ -614,6 +651,12 @@ const panels = {
     xLabel: 'Swaths (0 = newest)',
     yLabel: 'Across-track (m)   port ↑',
     pinRight: true,
+    // Depths in the slice's band can only lie within it.
+    valueRange: () => {
+      if (state.hMode === 'amplitude' || !state.grid) return null;
+      const [lo, hi] = depthBand();
+      return { lo, hi };
+    },
     describe: (x, y) => {
       const c = columnAt(x);
       return `${Math.round(-x)} swaths ago${c ? ' (' + utc(c.t) + ' UTC)' : ''}, across ${y.toFixed(1)} m`;
@@ -844,6 +887,29 @@ function updatePie() {
   panels.pie.setImage({ w: p.cols, h: p.rows, data: p.data, x0, x1, y0, y1, extent: { x0, x1, y0, y1 } });
 }
 
+// Hillshading of a depth image (w x h, row-major, NaN where empty) as a factor per cell: the surface is lit from the
+// upper left of the plot, 45 degrees up. Cells are taken as square, size metres on a side (along track, the real
+// spacing depends on the vessel's speed), and depths as positive down.
+const SHADE = { ambient: 0.35, light: [-0.5, -0.5, Math.SQRT1_2] };  // light: unit vector (right, down the plot, up)
+function hillshade(z, w, h, size) {
+  const out = new Float32Array(w * h).fill(1);
+  const [lx, ly, lz] = SHADE.light;
+  const at = (r, c) => (r < 0 || r >= h || c < 0 || c >= w) ? NaN : z[r * w + c];
+  for (let r = 0; r < h; r++) {
+    for (let c = 0; c < w; c++) {
+      const z0 = z[r * w + c];
+      if (Number.isNaN(z0)) continue;
+      // Central differences, one-sided at edges and next to empty cells. Height is -depth.
+      const zl = at(r, c - 1), zr = at(r, c + 1), zu = at(r - 1, c), zd = at(r + 1, c);
+      const gx = -((Number.isNaN(zr) ? z0 : zr) - (Number.isNaN(zl) ? z0 : zl)) / ((Number.isNaN(zr) || Number.isNaN(zl) ? 1 : 2) * size);
+      const gy = -((Number.isNaN(zd) ? z0 : zd) - (Number.isNaN(zu) ? z0 : zu)) / ((Number.isNaN(zd) || Number.isNaN(zu) ? 1 : 2) * size);
+      const lit = Math.max(0, (-gx * lx - gy * ly + lz) / Math.hypot(gx, gy, 1));
+      out[r * w + c] = SHADE.ambient + (1 - SHADE.ambient) * lit / lz;  // flat ground keeps its color
+    }
+  }
+  return out;
+}
+
 // Build a slice image: rows are grid indices covering every column's data, columns are slice columns (oldest at left).
 // Returns null if no column has data.
 function sliceImage(cols, offKey, valKey) {
@@ -870,13 +936,16 @@ function updateSlices() {
   const x0 = -N * s.alongTrackAvg_swath;  // x is in swaths, newest = 0
   const span = -historyColumns() * s.alongTrackAvg_swath;  // auto-zoom shows the full history, filling from the right
 
-  for (const [panel, offKey, valKey] of [[panels.vertical, 'vOff', 'v'], [panels.horizontal, 'hOff', 'h']]) {
+  const depth = state.hMode !== 'amplitude';
+  for (const [panel, offKey, valKey] of [[panels.vertical, 'vOff', 'v'],
+                                         [panels.horizontal, depth ? 'hzOff' : 'hOff', depth ? 'hz' : 'h']]) {
     const im = sliceImage(cols, offKey, valKey);
     if (!im) { panel.setImage(null); continue; }
     const ext = dataExtentRows(im.data, N, im.rows) || [0, im.rows - 1];
     panel.setImage({
       w: N, h: im.rows, data: im.data, x0, x1: 0, y0: im.row0 * b, y1: (im.row0 + im.rows) * b,
       extent: { x0: span, x1: 0, y0: (im.row0 + ext[0]) * b, y1: (im.row0 + ext[1] + 1) * b },
+      shade: panel === panels.horizontal && state.hMode === 'shaded' ? hillshade(im.data, N, im.rows, b) : null,
     });
   }
 }
@@ -901,6 +970,19 @@ function resetData() {
 // ---------------------------------------------------------------------------
 // Controls
 // ---------------------------------------------------------------------------
+// Horizontal slice: amplitude, or the amplitude-weighted depth of the signal in its band (optionally shaded).
+const hModeSelect = panels.horizontal.el.querySelector('.hmode');
+hModeSelect.addEventListener('change', () => {
+  const wasDepth = state.hMode !== 'amplitude';
+  state.hMode = hModeSelect.value;
+  const depth = state.hMode !== 'amplitude';
+  if (depth !== wasDepth) {  // shading alone keeps the color scale
+    panels.horizontal.resetLevels();
+    panels.horizontal.setUnit(depth ? 'm' : 'dB');
+  }
+  updateSlices();
+});
+
 const pauseButton = document.getElementById('pause');
 pauseButton.addEventListener('click', () => {
   state.paused = !state.paused;
@@ -1228,12 +1310,14 @@ function handleBinary(buf) {
     if (!state.paused) updatePie();
   } else if (header.type === 'columns') {
     // Payload: every column's vertical values, then every column's horizontal values.
-    const { count, times, v, h } = header;
+    // Then every column's amplitude-weighted depths in the horizontal slice's band.
+    const { count, times, v, h, hz } = header;
     const vals = [];
     let pos = 0;
-    for (const [, len] of [...v, ...h]) { vals.push(payload.subarray(pos, pos + len)); pos += len; }
+    for (const [, len] of [...v, ...h, ...hz]) { vals.push(payload.subarray(pos, pos + len)); pos += len; }
     for (let k = 0; k < count; k++) {
       state.columns.push({ t: times[k], vOff: v[k][0], v: vals[k], hOff: h[k][0], h: vals[count + k],
+                           hzOff: hz[k][0], hz: vals[2 * count + k],
                            layers: header.layers[k], thermo: header.thermocline[k] });
     }
     const max = historyColumns();
@@ -1246,6 +1330,12 @@ function handleText(msg) {
   if (msg.type === 'settings') {
     state.settings = msg.settings;
     state.grid = msg.grid;
+    // The horizontal slice's depths span its band: a new band (slice depth or thickness) needs a new color scale.
+    const band = state.grid && JSON.stringify(state.grid.horizontal);
+    if (band !== state.hBand) {
+      state.hBand = band;
+      if (state.hMode !== 'amplitude') { panels.horizontal.resetLevels(); updateSlices(); }
+    }
     showSettings();
     panels.pie.yLabel = panels.vertical.yLabel = depthLabel();
     // The top depth may have changed (heave allowance, depth reference).

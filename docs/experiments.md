@@ -12,6 +12,7 @@ Ideas being tried on the browser plotter. Some may not be kept.
 | Sidelobe suppression | Settings > Pie grid (shared) | See below. Applies before gridding, so the pie and both slices are corrected. |
 | Layer tracking | Toolbar "Tracking: Layers" (per viewer); Settings > Vertical slice > Layer threshold (shared) | `Web/layers.py`, see below. Any number of layers. |
 | Data source: real-time or replay | Source bar under the toolbar: Configure… sets the UDP address; Replay opens a file browser; `--replay FILE`, `--data-dir DIR` (shared) | `Web/replay.py` plays a recorded file (play/pause, speed, seek). See browser-design.md. |
+| Horizontal slice depth | Horizontal slice header: Amplitude / Depth / Depth, shaded (per viewer) | See below. |
 | Thermocline tracking and cast alert | Toolbar "Tracking: Thermocline" (per viewer); Settings > Thermocline (shared) | `Web/thermocline.py`, after Cordero Ros (2018), see below. One feature: the thermocline bottom. |
 
 Both trackers run on the server; the Tracking selector chooses which is drawn. They answer different questions:
@@ -90,6 +91,38 @@ angle bins, over 60 datagrams:
 The median uses a sort per range row (6 ms) instead of `np.nanmedian` (21 ms). Suppression also weakens horizontal
 layers, which are similar across beams at a given range: the thermocline edge below fell from about 0.35 to 0.2
 dB/m with range and beam medians (the earlier all-beam version), so the thermocline pick threshold was set to work with both.
+
+### Horizontal slice depth
+
+The horizontal slice's header selects Amplitude (the mean level in the band) or Depth: for each across-track cell of
+each slice column, the amplitude-weighted mean depth of the signal in the band, sum(a z) / sum(a) over the band's
+grid rows and the column's swaths, where a is a cell's linear amplitude (10^(dB/20) of its mean level) and z its
+centre depth (`band_weighted_depth` in `worker.py`). It is sent with every column, so switching needs nothing from
+the server.
+
+"Depth, shaded" adds hillshading in the page (light from the upper left at 45 degrees, 35 % ambient), taking cells as
+square: along track, the real spacing depends on the vessel's speed. Depths use the color map reversed, so shallow is
+the high end (yellow in viridis) and deep the low end. With 500 columns of 500 cells, building and shading the image
+takes about 35 ms per update in the page; the worker's cost is about 0.05 ms per datagram.
+
+Only cells where the swath covers the whole band are used: those with data at or above the band's top row and at or
+below its bottom row in that swath. Elsewhere the fan's edge (or the seafloor) leaves only part of the band with
+data, which biased the depth toward the covered part by up to half the band's thickness. On the test file a 9-11 m band
+is limited to about +-19.5 m across, 9 m x tan 64.8 degrees (the outermost beam), while the amplitude mode covers
++-49 m. Where the band reaches the seafloor, samples run down to the bottom detection, so those cells count as covered
+and their depths follow the seafloor echo.
+
+On the test file (suppression off, band 9-11 m) the weighted depth stays within about 0.1 m of the band's centre
+(10th-90th percentile 9.92-10.08 m): a 3 dB contrast is only a factor 1.4 in amplitude, so the weighting moves the mean
+little unless a target or layer stands well above the rest of the band. In a 10-15 m band over the layer at 11-14 m:
+12.1-13.1 m.
+
+Also tried and dropped: the depth of the strongest cell in the band (in the column's along-track average), which
+spanned the band (9.1-10.9 m in the 9-11 m band) but stepped by the cell size and was mostly noise.
+
+In the depth modes the color scale's range is the band itself (the only depths possible), and levels are kept
+inside it. Changing the slice depth or thickness resets the scale to the new band; columns recorded before the change
+keep their old band's depths (slice settings apply to new data), and fall outside the scale until they scroll out.
 
 ### Layer tracking
 

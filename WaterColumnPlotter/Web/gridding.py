@@ -178,10 +178,14 @@ def add_blocks(a, b):
     the index of the first element along each axis. Returns a block covering both.
     """
     (off_a, sa, ca), (off_b, sb, cb) = a, b
+    if not sb.size:
+        return a  # an empty block adds nothing, and its offset shouldn't widen the result
+    if not sa.size:
+        return b
     lo = [min(x, y) for x, y in zip(off_a, off_b)]
     hi = [max(x + n, y + m) for x, y, n, m in zip(off_a, off_b, sa.shape, sb.shape)]
     sums = np.zeros([h - l for l, h in zip(lo, hi)])
-    counts = np.zeros(sums.shape, dtype=np.int64)
+    counts = np.zeros(sums.shape, dtype=np.result_type(ca, cb))  # counts, or weights (float)
     for off, s, c in ((off_a, sa, ca), (off_b, sb, cb)):
         idx = tuple(slice(o - l, o - l + n) for o, l, n in zip(off, lo, s.shape))
         sums[idx] += s

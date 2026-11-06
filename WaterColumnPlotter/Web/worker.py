@@ -44,6 +44,32 @@ CALIBRATION_PICKS = 10
 RESET_SETTINGS = ('binSize_m', 'alongTrackAvg_swath', 'referenceToSurface', 'transducerDepth_m', 'sidelobeSuppression')
 
 
+def band_weighted_depth(sums, counts, offset, band, bin_size):
+    """
+    Per grid column, over the rows of band [r0, r1): the sum of each cell's linear amplitude (from its mean dB) times
+    its depth, and the sum of the amplitudes, as a 1D block ((col0,), sum, weight). Their ratio is the
+    amplitude-weighted mean depth of the signal in the band.
+    Only columns where the swath covers the whole band are included: those with data at or above the band's top row
+    and at or below its bottom row. Elsewhere the fan's edge or the seafloor cuts the band, and only part of it would
+    count, biasing the depth. Empty if the band isn't wholly inside the block.
+    """
+    (row0, col0), (r0, r1) = offset, band
+    a, b = r0 - row0, r1 - row0
+    empty = (col0,), np.zeros(0), np.zeros(0)
+    if a < 0 or b > sums.shape[0] or b <= a:
+        return empty
+    covered = (counts[:a + 1] > 0).any(axis=0) & (counts[b - 1:] > 0).any(axis=0)
+    cols = np.flatnonzero(covered)
+    if not len(cols):
+        return empty
+    c0, c1 = cols[0], cols[-1] + 1
+    n = np.where(covered[c0:c1], counts[a:b, c0:c1], 0)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        amplitude = np.where(n > 0, 10.0 ** (sums[a:b, c0:c1] / np.maximum(n, 1) / 20.0), 0.0)
+    depth = (row0 + np.arange(a, b) + 0.5)[:, None] * bin_size
+    return (int(col0 + c0),), (amplitude * depth).sum(axis=0), amplitude.sum(axis=0)
+
+
 def band_sum(sums, counts, offset, band, axis):
     """
     Sum a 2D block over the part of band [i0, i1) that it covers, along axis (1: columns, 0: rows).
@@ -91,7 +117,7 @@ class Worker:
         self.recent = collections.deque(maxlen=s['alongTrackAvg_swath'])
         # Slice column being accumulated: {'swaths': set of swath keys, 'v': block, 'h': block, 'times': []}
         self.column = None
-        # Completed slice columns since the last update: (time, (v_off, v), (h_off, h), layers, thermocline)
+        # Completed slice columns since the last update: (time, (v_off, v), (h_off, h), layers, thermocline, (hz_off, hz))
         self.new_columns = []
         self.tracker = LayerTracker(min_level_db=s['layerMinLevel_dB'])
         self.thermocline = ThermoclineTracker(threshold_db_per_m=s['thermoclineThreshold_dBpm'],
@@ -119,6 +145,7 @@ class Worker:
         c = self.column
         (v_off,), v = average(c['v'])
         (h_off,), h = average(c['h'])
+        (hz_off,), hz = average(c['hz'])  # amplitude-weighted mean depth in the horizontal slice's band
         t = float(np.mean(c['times']))
         b = self.settings['binSize_m']
         depths = (v_off + np.arange(len(v))) * b
@@ -126,7 +153,7 @@ class Worker:
         seafloor = min(found) if found else None
         layers = self.tracker.add_profile(t, depths, v, seafloor)
         self.new_columns.append((t, (v_off, v), (h_off, h), layers,
-                                 self.track_thermocline(t, v_off, depths, v, seafloor)))
+                                 self.track_thermocline(t, v_off, depths, v, seafloor), (hz_off, hz)))
         self.column = None
 
     def set_svp(self, time, depth, speed):
@@ -225,13 +252,16 @@ class Worker:
             self.finish_column()
         v = band_sum(sums, counts, (row0, col0), self.v_band, axis=1)  # per row, over the across-track band
         h = band_sum(sums, counts, (row0, col0), self.h_band, axis=0)  # per column, over the depth band
+        hz = band_weighted_depth(sums, counts, (row0, col0), self.h_band, b)
         if self.column is None:
-            self.column = {'swaths': {swath}, 'v': v, 'h': h, 'times': [dg['header']['dgtime']], 'seafloor': [seafloor]}
+            self.column = {'swaths': {swath}, 'v': v, 'h': h, 'hz': hz, 'times': [dg['header']['dgtime']],
+                           'seafloor': [seafloor]}
         else:
             c = self.column
             c['swaths'].add(swath)
             c['v'] = add_blocks(c['v'], v)
             c['h'] = add_blocks(c['h'], h)
+            c['hz'] = add_blocks(c['hz'], hz)
             c['times'].append(dg['header']['dgtime'])
             c['seafloor'].append(seafloor)
 

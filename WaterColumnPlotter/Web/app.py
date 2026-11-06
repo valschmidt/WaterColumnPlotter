@@ -149,8 +149,10 @@ class Server:
         header = {'type': 'columns', 'count': len(columns), 'times': [c[0] for c in columns],
                   'v': [[c[1][0], len(c[1][1])] for c in columns],
                   'h': [[c[2][0], len(c[2][1])] for c in columns],
+                  'hz': [[c[5][0], len(c[5][1])] for c in columns],
                   'layers': [c[3] for c in columns], 'thermocline': [c[4] for c in columns]}
-        return frame(header, *[c[1][1] for c in columns], *[c[2][1] for c in columns])
+        return frame(header, *[c[1][1] for c in columns], *[c[2][1] for c in columns],
+                     *[c[5][1] for c in columns])
 
     def pie_frame(self):
         data, row0, col0 = self.pie
