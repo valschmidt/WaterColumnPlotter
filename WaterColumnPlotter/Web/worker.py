@@ -4,7 +4,8 @@ Worker: parses complete #MWC datagrams with pykmall, grids them, and produces di
 - slice columns: vertical (per depth row) and horizontal (per across-track column) averages, averaged along track
   in blocks of alongTrackAvg_ping pings. (A ping is identified by pingCnt; dual-swath systems send two #MWC
   datagrams per ping.)
-Results are put on a queue once per update interval.
+Results are put on a queue once per update interval. A recorded file can be replayed in place of live data
+(see replay.py).
 
 Grids are blocks covering just the data (see gridding.py), so the pie and slice columns carry the index of their
 first row / column.
@@ -13,6 +14,7 @@ first row / column.
 import collections
 import functools
 import logging
+import os
 import queue
 import time
 
@@ -22,6 +24,7 @@ from KMALL.kmall import kmall
 from WaterColumnPlotter.Web.gridding import (GridTooLarge, add_blocks, average, grid_mwc, horizontal_band,
                                              vertical_band)
 from WaterColumnPlotter.Web.layers import LayerTracker
+from WaterColumnPlotter.Web.replay import Replay
 from WaterColumnPlotter.Web.thermocline import ThermoclineTracker, depth_error, svp_thermocline
 
 logger = logging.getLogger(__name__)
@@ -228,10 +231,94 @@ class Worker:
                 'stats': {**receiver_stats, **self.stats}}
 
 
-def run(settings, in_queue, settings_queue, out_queue, update_interval):
-    """Process entry point."""
+def handle_datagram(worker, item, out_queue):
+    """Process one complete datagram (bytes), live or replayed."""
+    kind = item[4:8]
+    if kind == b'#SVP':
+        worker.km.OpenBytestoRead(item)
+        svp = worker.km.read_EMdgmSVP()
+        depth = [round(float(d), 2) for d in svp['sensorData']['depth_m']]
+        speed = [round(float(c), 2) for c in svp['sensorData']['soundVelocity_mPerSec']]
+        found = worker.set_svp(svp['time_sec'], depth, speed)
+        out_queue.put({'type': 'svp', 'time': svp['time_sec'], 'depth_m': depth, 'speed_mps': speed,
+                       'thermocline_m': None if found is None else [round(z, 2) for z in found]})
+    elif kind == b'#IIP':
+        depth = worker.process_installation(item)
+        if depth is not None:
+            out_queue.put({'type': 'installation', 'transducerDepth_m': round(depth, 3)})
+    elif kind == b'#MWC':
+        worker.process(item)
+
+
+class Source:
+    """Where the worker's data comes from: real-time (datagrams from the receiver) or replay of a recorded file."""
+
+    def __init__(self, worker, out_queue):
+        self.worker = worker
+        self.out_queue = out_queue
+        self.mode = 'realtime'
+        self.replay = None  # the file being replayed, if one is open
+
+    def status(self):
+        status = {'type': 'source', 'mode': self.mode}
+        if self.replay is not None:
+            status['replay'] = self.replay.status()
+        return status
+
+    def start_over(self, new_source):
+        """Clear what was processed; new_source: the cast belongs to the old source, so drop it too."""
+        self.worker.reset()
+        if new_source:
+            self.worker.svp = None
+        self.out_queue.put({'type': 'reset', 'svp': new_source})
+
+    def close_file(self):
+        if self.replay is not None:
+            self.replay.close()
+            self.replay = None
+
+    def command(self, command):
+        """
+        Apply a command from the server: 'realtime' or 'replay' (switch mode), {'cmd': 'open', 'path'}, 'play',
+        'pause', {'cmd': 'speed', 'speed'} or {'cmd': 'seek', 'time'}.
+        """
+        cmd = command['cmd']
+        replay = self.replay
+        if cmd in ('realtime', 'replay') and cmd != self.mode:
+            self.close_file()
+            self.mode = cmd
+            self.start_over(True)
+            logger.info("Source: %s", 'real-time' if cmd == 'realtime' else 'replay')
+        elif cmd == 'open':
+            try:
+                opened = Replay(command['path'])
+            except Exception as e:
+                logger.exception("Can't replay %s", command['path'])
+                self.out_queue.put({'type': 'source', 'error':
+                                    f"Can't replay {os.path.basename(command['path'])}: {e}"})
+                return
+            self.close_file()
+            self.replay, self.mode = opened, 'replay'
+            self.start_over(True)
+            logger.info("Replaying %s", command['path'])
+        elif replay is not None and cmd == 'seek':
+            self.start_over(False)
+            for item in replay.seek(float(command['time'])):
+                handle_datagram(self.worker, item, self.out_queue)
+        elif replay is not None and cmd in ('play', 'pause'):
+            if cmd == 'play' and replay.finished:  # play again from the start
+                self.command({'cmd': 'seek', 'time': replay.start})
+            replay.set_playing(cmd == 'play')
+        elif replay is not None and cmd == 'speed':
+            replay.set_speed(max(0.0, float(command['speed'])))
+        self.out_queue.put(self.status())
+
+
+def run(settings, in_queue, settings_queue, control_queue, out_queue, update_interval):
+    """Process entry point. Processes real-time datagrams from in_queue, or a file being replayed instead."""
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(levelname)s: %(message)s')
     worker = Worker(settings)
+    source = Source(worker, out_queue)
     receiver_stats = {}
     next_update = time.monotonic() + update_interval
     while True:
@@ -242,25 +329,38 @@ def run(settings, in_queue, settings_queue, out_queue, update_interval):
                     out_queue.put({'type': 'reset'})
         except queue.Empty:
             pass
+        try:
+            while True:
+                source.command(control_queue.get_nowait())
+        except queue.Empty:
+            pass
+
+        # When replaying, wait for the next datagram's time (if before the next update) instead of live data.
+        wait_until = next_update
+        replay = source.replay
+        if replay is not None and replay.playing:
+            if replay.finished:
+                replay.set_playing(False)
+            else:
+                now = time.monotonic()
+                due = replay.due(now)
+                if due <= now:
+                    try:
+                        handle_datagram(worker, replay.next(), out_queue)
+                    except Exception:
+                        logger.exception("Failed to process datagram")
+                    wait_until = now
+                else:
+                    wait_until = min(wait_until, due)
 
         try:
-            item = in_queue.get(timeout=max(0.0, next_update - time.monotonic()))
+            item = in_queue.get(timeout=max(0.0, wait_until - time.monotonic()))
             if isinstance(item, tuple):
                 receiver_stats = item[1]
-            elif item[4:8] == b'#SVP':
-                worker.km.OpenBytestoRead(item)
-                svp = worker.km.read_EMdgmSVP()
-                depth = [round(float(d), 2) for d in svp['sensorData']['depth_m']]
-                speed = [round(float(c), 2) for c in svp['sensorData']['soundVelocity_mPerSec']]
-                found = worker.set_svp(svp['time_sec'], depth, speed)
-                out_queue.put({'type': 'svp', 'time': svp['time_sec'], 'depth_m': depth, 'speed_mps': speed,
-                               'thermocline_m': None if found is None else [round(z, 2) for z in found]})
-            elif item[4:8] == b'#IIP':
-                depth = worker.process_installation(item)
-                if depth is not None:
-                    out_queue.put({'type': 'installation', 'transducerDepth_m': round(depth, 3)})
-            else:
-                worker.process(item)
+            elif source.mode == 'realtime':
+                handle_datagram(worker, item, out_queue)
+            else:  # replaying: live data is ignored
+                worker.stats['live_ignored'] = worker.stats.get('live_ignored', 0) + 1
         except queue.Empty:
             pass
         except Exception:
@@ -268,4 +368,6 @@ def run(settings, in_queue, settings_queue, out_queue, update_interval):
 
         if time.monotonic() >= next_update:
             out_queue.put(worker.take_update(receiver_stats))
+            if source.replay is not None:
+                out_queue.put(source.status())
             next_update = time.monotonic() + update_interval

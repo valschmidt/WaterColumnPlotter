@@ -955,6 +955,7 @@ function showSettings() {
   document.getElementById('transducer-depth').textContent = d === null
     ? 'Transducer depth not yet known (waiting for the installation datagram)'
     : `Transducer ${d.toFixed(2)} m below the surface`;
+  markDirty(settingsForm);
 }
 
 
@@ -980,23 +981,235 @@ settingsForm.addEventListener('submit', ev => {
 });
 
 // ---------------------------------------------------------------------------
+// Data source: real-time or replay (shared: the server's source is the same for every viewer)
+// ---------------------------------------------------------------------------
+const sourceBar = document.getElementById('source-bar');
+const sourceEl = {
+  badge: document.getElementById('mode-badge'), error: document.getElementById('source-error'),
+  realtime: document.getElementById('realtime-controls'), replay: document.getElementById('replay-controls'),
+  summary: document.getElementById('realtime-summary'), state: document.getElementById('realtime-state'),
+  browse: document.getElementById('replay-browse'), file: document.getElementById('replay-file'),
+  play: document.getElementById('replay-play'), speed: document.getElementById('replay-speed'),
+  position: document.getElementById('replay-position'), time: document.getElementById('replay-time'),
+};
+const realtimeConfig = document.getElementById('realtime-config');
+const realtimeConfigToggle = document.getElementById('realtime-config-toggle');
+let source = { mode: 'realtime', config: {} };  // latest 'source' message from the server
+let seeking = false;  // the position slider is being dragged
+let listedDir = null;  // directory the file menu was filled from
+
+function sourceCommand(cmd, extra = {}) { send({ type: 'source', cmd, ...extra }); }
+function utcTime(t) { return new Date(t * 1000).toISOString().slice(0, 19).replace('T', ' '); }
+function joinPath(dir, name) { return dir.replace(/[\\/]+$/, '') + (dir.includes('\\') ? '\\' : '/') + name; }
+
+function showSource() {
+  const replaying = source.mode === 'replay', r = source.replay, c = source.config;
+  sourceBar.dataset.mode = source.mode;
+  for (const b of sourceBar.querySelectorAll('.segmented button')) {
+    b.setAttribute('aria-pressed', String(b.dataset.mode === source.mode));
+  }
+  sourceEl.realtime.hidden = replaying;
+  sourceEl.replay.hidden = !replaying;
+  if (replaying) closeRealtimeConfig();
+
+  sourceEl.badge.classList.toggle('idle', replaying && !(r && r.playing));
+  sourceEl.badge.textContent = !replaying ? 'Real-time'
+    : !r ? 'Replay · no file' : r.playing ? 'Replaying' : r.finished ? 'Replay ended' : 'Replay paused';
+  sourceEl.summary.textContent = `UDP ${c.udpIp}:${c.udpPort}` + (c.multicast ? ` · multicast ${c.multicast}` : '');
+
+  sourceEl.file.hidden = !r;
+  for (const el of [sourceEl.play, sourceEl.speed, sourceEl.position]) el.disabled = !r;
+  if (r) {
+    sourceEl.play.textContent = r.playing ? '❚❚ Pause' : (r.finished ? '▶ Play again' : '▶ Play');
+    sourceEl.speed.value = String(r.speed);
+    sourceEl.position.min = r.start;
+    sourceEl.position.max = r.end;
+    if (!seeking) sourceEl.position.value = r.time;
+    const shown = seeking ? Number(sourceEl.position.value) : r.time;
+    sourceEl.time.textContent = `${utcTime(shown)} UTC` + (r.finished ? ' · end' : '');
+    if (listedDir !== c.dataDir) loadFileMenu();
+    else if (sourceEl.file.value !== r.name) sourceEl.file.value = r.name;
+  } else {
+    sourceEl.play.textContent = '▶ Play';
+    sourceEl.time.textContent = 'Browse… to choose a recording';
+  }
+  if (realtimeConfig.hidden) fillConfig();
+}
+
+// The file menu: the other recordings in the replayed file's directory.
+async function loadFileMenu() {
+  const dir = listedDir = source.config.dataDir;
+  try {
+    const listing = await (await fetch(`/browse?dir=${encodeURIComponent(dir)}`)).json();
+    if (listing.error) throw new Error(listing.error);
+    sourceEl.file.replaceChildren(...listing.files.map(f =>
+      Object.assign(document.createElement('option'), { value: f.name, textContent: f.name })));
+    if (source.replay) sourceEl.file.value = source.replay.name;
+  } catch (e) {
+    listedDir = null;
+  }
+}
+
+for (const b of sourceBar.querySelectorAll('.segmented button')) {
+  b.addEventListener('click', () => {
+    if (b.dataset.mode === 'replay') {
+      if (source.mode !== 'replay') openBrowser();  // switches once a file is chosen
+    } else if (source.mode !== 'realtime') {
+      sourceCommand('realtime');
+    }
+  });
+}
+sourceEl.browse.addEventListener('click', () => openBrowser());
+sourceEl.file.addEventListener('change', () => {
+  if (sourceEl.file.value) sourceCommand('open', { path: joinPath(source.config.dataDir, sourceEl.file.value) });
+});
+sourceEl.play.addEventListener('click', () => sourceCommand(source.replay && source.replay.playing ? 'pause' : 'play'));
+sourceEl.speed.addEventListener('change', () => sourceCommand('speed', { speed: Number(sourceEl.speed.value) }));
+sourceEl.position.addEventListener('input', () => { seeking = true; showSource(); });
+sourceEl.position.addEventListener('change', () => {
+  seeking = false;
+  sourceCommand('seek', { time: Number(sourceEl.position.value) });
+});
+
+// Browsing the plotter computer's directories for a recording.
+const browser = {
+  dialog: document.getElementById('browser'), dir: document.getElementById('browser-dir'),
+  up: document.getElementById('browser-up'), list: document.getElementById('browser-list'),
+  error: document.getElementById('browser-error'), parent: null,
+};
+function sizeText(bytes) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
+  return `${bytes.toFixed(i ? 1 : 0)} ${units[i]}`;
+}
+function browserItem(cls, icon, name, extra, onPick) {
+  const li = document.createElement('li');
+  li.className = cls;
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.innerHTML = '<span class="icon"></span><span class="name"></span><span class="size"></span>';
+  b.querySelector('.icon').textContent = icon;
+  b.querySelector('.name').textContent = name;
+  b.querySelector('.size').textContent = extra;
+  b.addEventListener('click', onPick);
+  li.append(b);
+  return li;
+}
+async function browseTo(dir) {
+  browser.error.textContent = '';
+  let listing;
+  try {
+    listing = await (await fetch(`/browse?dir=${encodeURIComponent(dir ?? '')}`)).json();
+  } catch (e) {
+    browser.error.textContent = 'Lost connection to the plotter.';
+    return;
+  }
+  if (listing.error) { browser.error.textContent = listing.error; return; }
+  browser.dir.value = listing.dir;
+  browser.parent = listing.parent;
+  browser.up.disabled = !listing.parent;
+  const items = [
+    ...listing.dirs.map(d => browserItem('dir', '▸', d + '/', '', () => browseTo(joinPath(listing.dir, d)))),
+    ...listing.files.map(f => browserItem('file', '≋', f.name, sizeText(f.size), () => {
+      sourceCommand('open', { path: joinPath(listing.dir, f.name) });
+      browser.dialog.close();
+    })),
+  ];
+  if (!listing.files.length) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = 'No .kmall or .kmwcd files here' + (listing.dirs.length ? '; open a directory above.' : '.');
+    items.push(li);
+  }
+  browser.list.replaceChildren(...items);
+  browser.list.scrollTop = 0;
+}
+function openBrowser() {
+  browser.dialog.showModal();
+  browseTo(source.config.dataDir);
+}
+browser.up.addEventListener('click', () => { if (browser.parent) browseTo(browser.parent); });
+browser.dir.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); browseTo(browser.dir.value.trim()); } });
+browser.dialog.addEventListener('click', ev => { if (ev.target === browser.dialog) browser.dialog.close(); });
+
+// Real-time configuration menu.
+function fillConfig() {
+  for (const input of realtimeConfig.querySelectorAll('input')) input.value = source.config[input.name] ?? '';
+  markDirty(realtimeConfig);
+}
+function configChanges() {
+  const changed = {};
+  for (const input of realtimeConfig.querySelectorAll('input')) {
+    if (String(input.value).trim() !== String(source.config[input.name] ?? '')) changed[input.name] = input.value.trim();
+  }
+  return changed;
+}
+function closeRealtimeConfig() {
+  realtimeConfig.hidden = true;
+  realtimeConfigToggle.setAttribute('aria-expanded', 'false');
+}
+realtimeConfigToggle.addEventListener('click', () => {
+  realtimeConfig.hidden = !realtimeConfig.hidden;
+  realtimeConfigToggle.setAttribute('aria-expanded', String(!realtimeConfig.hidden));
+  if (!realtimeConfig.hidden) fillConfig();
+});
+realtimeConfig.addEventListener('input', () => markDirty(realtimeConfig));
+realtimeConfig.addEventListener('submit', ev => {
+  ev.preventDefault();
+  const changed = configChanges();
+  if (Object.keys(changed).length) sourceCommand('config', { config: changed });
+  closeRealtimeConfig();
+});
+
+// Apply buttons: highlighted while their form has changes not yet applied.
+function markDirty(form) {
+  const dirty = form === settingsForm ? settingsChanged() : Object.keys(configChanges()).length > 0;
+  const button = form.querySelector('button[type="submit"]');
+  button.classList.toggle('dirty', dirty);
+}
+function settingsChanged() {
+  // Number fields only: the checkbox and menus apply at once.
+  return [...settingsForm.querySelectorAll('input[type="number"]')].some(input =>
+    input.value !== '' && Number(input.value) !== state.settings[input.name]);
+}
+settingsForm.addEventListener('input', () => markDirty(settingsForm));
+
+// About
+const aboutDialog = document.getElementById('about');
+document.getElementById('about-open').addEventListener('click', () => aboutDialog.showModal());
+aboutDialog.addEventListener('click', ev => { if (ev.target === aboutDialog) aboutDialog.close(); });  // backdrop
+
+// ---------------------------------------------------------------------------
 // Status line
 // ---------------------------------------------------------------------------
 const statusEl = document.getElementById('status');
 let lastStats = null;
 function showStats(stats) {
   const now = performance.now();
+  // Rate of datagrams received live, or processed from the file being replayed.
+  const replaying = source.mode === 'replay';
+  const count = replaying ? stats.processed ?? 0 : stats.datagrams ?? 0;
   let rate = '';
-  if (lastStats && stats.datagrams !== undefined) {
-    const dt = (now - lastStats.at) / 1000;
-    rate = `${((stats.datagrams - lastStats.datagrams) / dt).toFixed(1)} datagrams/s · `;
+  if (lastStats && lastStats.replaying === replaying && count >= lastStats.count) {
+    rate = `${((count - lastStats.count) / ((now - lastStats.at) / 1000)).toFixed(1)} datagrams/s · `;
   }
   // Pings skipped since the last update because the cell size is too small for the swath.
   const tooLarge = lastStats ? (stats.grid_too_large ?? 0) - lastStats.tooLarge : 0;
-  lastStats = { at: now, datagrams: stats.datagrams, tooLarge: stats.grid_too_large ?? 0 };
+  if (!replaying) {
+    // Whether real-time data is arriving, next to the source.
+    const perSec = lastStats && !lastStats.replaying && count >= lastStats.count
+      ? (count - lastStats.count) / ((now - lastStats.at) / 1000) : null;
+    sourceEl.state.textContent = stats.error ? '' : perSec ? `receiving ${perSec.toFixed(1)} datagrams/s` : 'no data arriving';
+    sourceEl.state.classList.toggle('ok', !stats.error && perSec > 0);
+    if (stats.error) sourceEl.error.textContent = stats.error;
+    else if (sourceEl.error.textContent.startsWith("Can't receive UDP")) sourceEl.error.textContent = '';
+  }
+  lastStats = { at: now, count, replaying, tooLarge: stats.grid_too_large ?? 0 };
   statusEl.classList.toggle('error', tooLarge > 0);
   statusEl.textContent = (tooLarge > 0 ? 'Cell size too small for this swath: pings are being skipped · ' : '') +
-    `${rate}received ${stats.datagrams ?? 0} · incomplete dropped ${stats.discarded ?? 0}` +
+    rate + (replaying ? `replaying · processed ${count}`
+      : `received ${count} · incomplete dropped ${stats.discarded ?? 0}`) +
     ` · processing ${(stats.process_ms ?? 0).toFixed(0)} ms/datagram` + (state.paused ? ' · paused' : '');
 }
 
@@ -1047,6 +1260,15 @@ function handleText(msg) {
     for (const p of Object.values(panels)) p.draw();
   } else if (msg.type === 'reset') {
     resetData();
+    if (msg.svp) { state.svp = null; panels.vertical.draw(); }
+  } else if (msg.type === 'source') {
+    if (msg.error) {
+      sourceEl.error.textContent = msg.error;
+    } else {
+      if (msg.mode !== source.mode || msg.replay?.name !== source.replay?.name) sourceEl.error.textContent = '';
+      source = msg;
+      showSource();
+    }
   } else if (msg.type === 'svp') {
     state.svp = msg;
     panels.vertical.draw();

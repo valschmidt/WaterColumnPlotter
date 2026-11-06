@@ -11,6 +11,7 @@ Ideas being tried on the browser plotter. Some may not be kept.
 | Sound speed profile | Strip right of the vertical slice | Latest #SVP, on the vertical slice's depth scale (shifted by the transducer depth when depths are measured from the transducer), with grid lines when the grid is on. The orange dashed line marks the strongest sound speed gradient in view (the velocline); the shaded band is the cast's thermocline, its bottom dashed. |
 | Sidelobe suppression | Settings > Pie grid (shared) | See below. Applies before gridding, so the pie and both slices are corrected. |
 | Layer tracking | Toolbar "Tracking: Layers" (per viewer); Settings > Vertical slice > Layer threshold (shared) | `Web/layers.py`, see below. Any number of layers. |
+| Data source: real-time or replay | Source bar under the toolbar: Configure… sets the UDP address; Replay opens a file browser; `--replay FILE`, `--data-dir DIR` (shared) | `Web/replay.py` plays a recorded file (play/pause, speed, seek). See browser-design.md. |
 | Thermocline tracking and cast alert | Toolbar "Tracking: Thermocline" (per viewer); Settings > Thermocline (shared) | `Web/thermocline.py`, after Cordero Ros (2018), see below. One feature: the thermocline bottom. |
 
 Both trackers run on the server; the Tracking selector chooses which is drawn. They answer different questions:
@@ -30,7 +31,9 @@ Options, applied to each ping's samples before gridding (values become dB relati
   the beam step second over-corrects beyond the minimum slant range (measured -7.8 dB there versus -2.7 dB in this
   order).
 
-(Subtracting the mean was dropped: it suppressed about as well as the median but is pulled by strong targets.)
+(Subtracting the mean was dropped: it suppressed about as well as the median but is pulled by strong targets.
+Subtracting the median per sector only beyond the first bottom return, adding back each sector's level there so values
+stayed absolute dB, was also tried and dropped.)
 
 Measured on a REV I EM2040 .kmwcd (dual swath, 24 m depth), mean of 10 pings, levels relative to the centre beams at
 11-15 m depth, gridding time per datagram:
@@ -144,5 +147,3 @@ Display
 11. **Per-viewer slice settings**: keep each ping's (cropped) grid so slices can be cut per viewer and recomputed for
     the whole history.
 12. **Snapshots and export**: PNG of the plots, CSV of tracked layers.
-13. **Playback from file in the server**, with speed control and pause, replacing the replay script and pairing with
-    the time slider.

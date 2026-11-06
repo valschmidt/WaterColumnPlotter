@@ -3,11 +3,13 @@ Browser-based Water Column Plotter: starts the UDP receiver and worker processes
 display data to connected browsers over a WebSocket.
 
 Usage: water_column_plotter_web [--udp-port 6020] [--multicast 225.255.255.255] [--http-port 8000] [--no-browser]
+                               [--data-dir DIR] [--replay FILE]
 """
 
 import argparse
 import asyncio
 import collections
+import ipaddress
 import json
 import logging
 import math
@@ -22,7 +24,7 @@ from pathlib import Path
 import numpy as np
 from aiohttp import WSMsgType, web
 
-from WaterColumnPlotter.Web import gridding, receiver, worker
+from WaterColumnPlotter.Web import gridding, receiver, replay, worker
 
 logger = logging.getLogger(__name__)
 
@@ -103,22 +105,36 @@ class Server:
         self.history = collections.deque(maxlen=history_columns(self.settings))  # (time, vertical, horizontal)
         self.pie = None
         self.svp = None  # latest sound speed profile message
+        # Data source: real-time UDP (the receiver's address) or replay of a recorded file (dataDir: the directory of
+        # the last file opened, where browsing starts). The mode and the file being replayed are the worker's ('source'
+        # messages from it); the rest is kept here.
+        self.source = {'mode': 'realtime'}
+        self.source_config = {'udpIp': args.udp_ip, 'udpPort': args.udp_port, 'multicast': args.multicast or '',
+                              'dataDir': str(Path(args.data_dir).resolve())}
         self.stats = {}
         self.clients = set()
 
-        ctx = multiprocessing.get_context('spawn')
+        self.ctx = ctx = multiprocessing.get_context('spawn')
         self.dg_queue = ctx.Queue()
         self.settings_queue = ctx.Queue()
         self.result_queue = ctx.Queue()
-        self.processes = [
-            ctx.Process(target=receiver.run, name='receiver', daemon=True,
-                        args=(args.udp_ip, args.udp_port, args.multicast, self.dg_queue)),
-            ctx.Process(target=worker.run, name='worker', daemon=True,
-                        args=(self.settings, self.dg_queue, self.settings_queue, self.result_queue,
-                              args.update_interval)),
-        ]
+        self.control_queue = ctx.Queue()  # source commands for the worker
+        if args.replay:
+            self.control_queue.put({'cmd': 'open', 'path': str(Path(args.replay).resolve())})
+        self.receiver = self.new_receiver()
+        self.worker = ctx.Process(target=worker.run, name='worker', daemon=True,
+                                  args=(self.settings, self.dg_queue, self.settings_queue, self.control_queue,
+                                        self.result_queue, args.update_interval))
+
+    def new_receiver(self):
+        c = self.source_config
+        return self.ctx.Process(target=receiver.run, name='receiver', daemon=True,
+                                args=(c['udpIp'], c['udpPort'], c['multicast'] or None, self.dg_queue))
 
     # ----- Messages to browsers -----
+
+    def source_message(self):
+        return json.dumps({**self.source, 'type': 'source', 'config': self.source_config})
 
     def settings_message(self):
         # Grid columns / rows averaged for the slices, so pages can draw them exactly as the worker uses them.
@@ -157,10 +173,10 @@ class Server:
 
     async def relay_results(self):
         while True:
-            dead = [p.name for p in self.processes if not p.is_alive()]
-            if dead:
-                # Without the receiver or worker no data can arrive; stop rather than serve a page that never updates.
-                logger.error("The %s process exited (see its error above); shutting down.", ' and '.join(dead))
+            if not self.worker.is_alive():
+                # Without the worker nothing is processed; stop rather than serve a page that never updates. (If the
+                # receiver can't open its socket it reports why and exits; the page shows that.)
+                logger.error("The worker process exited (see its error above); shutting down.")
                 os.kill(os.getpid(), signal.SIGINT)
                 return
             try:
@@ -169,7 +185,15 @@ class Server:
                 continue
             if msg['type'] == 'reset':
                 self.clear()
-                await self.broadcast(json.dumps({'type': 'reset'}))
+                if msg.get('svp'):  # source changed: the cast came from the other source
+                    self.svp = None
+                await self.broadcast(json.dumps(msg))
+            elif msg['type'] == 'source':
+                if 'error' in msg:
+                    await self.broadcast(json.dumps(msg))
+                else:
+                    self.source = msg
+                    await self.broadcast(self.source_message())
             elif msg['type'] == 'svp':
                 self.svp = json.dumps(msg)
                 await self.broadcast(self.svp)
@@ -193,6 +217,19 @@ class Server:
     async def index(self, request):
         return web.FileResponse(STATIC_DIR / 'index.html')
 
+    async def browse(self, request):
+        """
+        Browse the plotter computer's directories for recorded files: ?dir=PATH (default: the replay directory).
+        Returns the directory, its parent and its subdirectories and recorded files.
+        """
+        try:
+            path = Path(request.query.get('dir') or self.source_config['dataDir']).expanduser().resolve()
+            dirs, files = await asyncio.to_thread(replay.list_directory, path)
+        except OSError as e:
+            return web.json_response({'error': f"Can't open {request.query.get('dir')}: {e.strerror or e}"})
+        return web.json_response({'dir': str(path), 'parent': str(path.parent) if path.parent != path else None,
+                                  'dirs': dirs, 'files': files})
+
     async def websocket(self, request):
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
@@ -204,6 +241,7 @@ class Server:
             await ws.send_bytes(self.pie_frame())
         if self.svp is not None:
             await ws.send_str(self.svp)
+        await ws.send_str(self.source_message())
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
@@ -215,6 +253,61 @@ class Server:
     async def handle_client_message(self, msg):
         if msg.get('type') == 'settings':
             await self.change_settings(msg.get('settings', {}))
+        elif msg.get('type') == 'source':
+            await self.source_command(msg)
+
+    async def source_error(self, error):
+        await self.broadcast(json.dumps({'type': 'source', 'error': error}))
+
+    async def source_command(self, msg):
+        """
+        {'cmd': 'realtime' | 'replay'}: switch source. {'cmd': 'config', 'config': {...}}: change the UDP address
+        (restarting the receiver). Replay commands ({'cmd': 'open', 'path'}, 'play', 'pause', 'speed', 'seek') go to
+        the worker.
+        """
+        cmd = msg.get('cmd')
+        if cmd == 'config':
+            await self.change_source_config(msg.get('config', {}))
+        elif cmd == 'open':
+            # A recorded file anywhere on the plotter's computer; its directory becomes the replay directory.
+            path = Path(str(msg.get('path', ''))).expanduser().resolve()
+            if not (path.suffix.lower() in replay.EXTENSIONS and path.is_file()):
+                await self.source_error(f"Not a recorded .kmall / .kmwcd file: {msg.get('path')}")
+                return
+            self.source_config['dataDir'] = str(path.parent)
+            self.control_queue.put({'cmd': 'open', 'path': str(path)})
+        elif cmd in ('realtime', 'replay', 'play', 'pause', 'speed', 'seek'):
+            self.control_queue.put({k: msg[k] for k in ('cmd', 'speed', 'time') if k in msg})
+
+    async def change_source_config(self, requested):
+        new = dict(self.source_config)
+        try:
+            if 'udpIp' in requested:
+                new['udpIp'] = str(ipaddress.IPv4Address(str(requested['udpIp']).strip()))
+            if 'udpPort' in requested:
+                new['udpPort'] = int(requested['udpPort'])
+                if not 1 <= new['udpPort'] <= 65535:
+                    raise ValueError("The UDP port must be 1-65535")
+            if 'multicast' in requested:
+                group = str(requested['multicast'] or '').strip()
+                if group and not ipaddress.IPv4Address(group).is_multicast:
+                    raise ValueError(f"{group} is not a multicast address (224.0.0.0-239.255.255.255)")
+                new['multicast'] = group
+        except ValueError as e:
+            await self.source_error(str(e))
+            return
+        udp_changed = any(new[k] != self.source_config[k] for k in ('udpIp', 'udpPort', 'multicast'))
+        self.source_config = new
+        if udp_changed:
+            logger.info("Restarting the receiver on %s:%d%s", new['udpIp'], new['udpPort'],
+                        f" multicast {new['multicast']}" if new['multicast'] else "")
+            old = self.receiver
+            old.terminate()
+            await asyncio.to_thread(old.join, 2)
+            self.dg_queue.put(('stats', {}))  # forget the old receiver's counts (and any error)
+            self.receiver = self.new_receiver()
+            self.receiver.start()
+        await self.broadcast(self.source_message())
 
     async def change_settings(self, requested):
         new = validate_settings(self.settings, requested)
@@ -233,8 +326,8 @@ class Server:
     # ----- Lifecycle -----
 
     async def on_startup(self, app):
-        for p in self.processes:
-            p.start()
+        self.receiver.start()
+        self.worker.start()
         app['relay'] = asyncio.create_task(self.relay_results())
         url = f'http://{"localhost" if self.args.http_host in ("127.0.0.1", "0.0.0.0") else self.args.http_host}' \
               f':{self.args.http_port}/'
@@ -249,7 +342,7 @@ class Server:
             await ws.close(code=1001, message=b'Server shutting down')
 
     async def on_cleanup(self, app):
-        for p in self.processes:
+        for p in (self.receiver, self.worker):
             p.terminate()
             p.join(timeout=2)
 
@@ -257,6 +350,7 @@ class Server:
         app = web.Application()
         app.router.add_get('/', self.index)
         app.router.add_get('/ws', self.websocket)
+        app.router.add_get('/browse', self.browse)
         app.router.add_static('/static/', STATIC_DIR)
         app.on_startup.append(self.on_startup)
         app.on_shutdown.append(self.on_shutdown)
@@ -275,7 +369,13 @@ def main():
     parser.add_argument('--http-port', type=int, default=8000, help="Port to serve the page on.")
     parser.add_argument('--update-interval', type=float, default=1.0, help="Seconds between display updates.")
     parser.add_argument('--no-browser', action='store_true', help="Don't open a browser window.")
+    parser.add_argument('--data-dir', default=None,
+                        help="Directory where browsing for recorded .kmall/.kmwcd files to replay starts (default: "
+                             "the --replay file's directory, or the current directory).")
+    parser.add_argument('--replay', default=None, metavar='FILE', help="Replay this recorded file at start-up.")
     args = parser.parse_args()
+    if args.data_dir is None:
+        args.data_dir = str(Path(args.replay).resolve().parent) if args.replay else os.getcwd()
 
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(levelname)s: %(message)s')
     logging.getLogger('aiohttp.access').setLevel(logging.WARNING)

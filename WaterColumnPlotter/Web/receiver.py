@@ -1,6 +1,7 @@
 """
 UDP receiver: reads Kongsberg datagrams from a socket, reassembles partitioned #MWC datagrams, and puts each
-complete #MWC datagram, and any #IIP (installation parameters) or #SVP (sound speed profile), on a queue. Runs in its own process and does nothing else, so it keeps up with the sonar.
+complete #MWC datagram, and any #IIP (installation parameters) or #SVP (sound speed profile), on a queue. Runs in its
+own process and does nothing else, so it keeps up with the sonar.
 """
 
 import logging
@@ -60,7 +61,14 @@ def reassemble(parts, lead_size):
 def run(bind_ip, port, multicast_group, out_queue, rcvbuf=8 * 2 ** 20):
     """Process entry point. Puts complete #MWC datagrams (bytes) and ('stats', dict) tuples on out_queue."""
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(levelname)s: %(message)s')
-    sock = open_socket(bind_ip, port, multicast_group, rcvbuf)
+    try:
+        sock = open_socket(bind_ip, port, multicast_group, rcvbuf)
+    except OSError as e:
+        # Reported on the page; replay still works, and the address can be changed there.
+        where = f"{bind_ip}:{port}" + (f" multicast {multicast_group}" if multicast_group else "")
+        logger.error("Can't receive UDP on %s: %s", where, e)
+        out_queue.put(('stats', {'error': f"Can't receive UDP on {where}: {e.strerror or e}"}))
+        return
     km = kmall()
     pending = {}  # key -> [arrival time, parts list]
     stats = {'packets': 0, 'datagrams': 0, 'discarded': 0}

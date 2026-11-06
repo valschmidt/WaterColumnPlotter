@@ -18,8 +18,8 @@ One command (`water_column_plotter_web`) starts one Python program, which opens 
 Sonar / SIS / KmallPlayer --UDP--> receiver process: socket reads, partition reassembly
                                         |  multiprocessing.Queue (complete datagrams)
                                         v
-                                   worker process: pykmall parse -> grid -> pie and slice columns
-                                        |  multiprocessing.Queue (results)      ^ settings
+recorded .kmall/.kmwcd file ------> worker process: pykmall parse -> grid -> pie and slice columns
+  (replay, read by the worker)          |  multiprocessing.Queue (results)      ^ settings, source commands
                                         v                                       |
                                    main process: aiohttp web server -----------+
                                         |  HTTP (page) + WebSocket (binary frames, JSON messages)
@@ -31,6 +31,19 @@ Sonar / SIS / KmallPlayer --UDP--> receiver process: socket reads, partition rea
   It uses a large socket receive buffer (default 8 MB, where the OS allows). Datagrams are parsed with pykmall
   (`kmall.OpenBytestoRead`, `read_EMdgmHeader`, `read_EMdgmMpartition`, `read_EMdgmMbody`).
 - **Worker** parses each complete #MWC with `kmall.read_EMdgmMWC`, grids it, and produces display data.
+- **Source**: the page's Source bar switches between real-time and replay. The source is shared, like the settings,
+  and switching clears the display.
+  - Real-time: Configure… sets the UDP listen address, port and multicast group (initially `--udp-ip`, `--udp-port`,
+    `--multicast`). Changing them restarts the receiver; if it can't open the socket, the error is shown in the bar and replay still
+    works.
+  - Replay: choosing Replay opens a dialog for browsing the plotter computer's directories (served by `/browse`,
+    starting in `--data-dir`, by default the current directory or the `--replay FILE` file's) for a .kmall / .kmwcd
+    file; after that, a menu offers the other recordings in the same directory. The file is played through the
+    worker in place of real-time data, which is ignored meanwhile.
+    The worker indexes the file with `kmall.index_file` and reads its #MWC, #SVP and #IIP datagrams itself, paced by
+    their timestamps at a chosen speed (0.5x to 10x, or as fast as they can be processed), so playback waits for
+    processing instead of dropping data, and no UDP partitioning is involved. Seeking clears the display and
+    restarts from the chosen time, after re-applying the latest #IIP and #SVP before it.
 - **Main process** runs the asyncio web server, serves the page, and relays worker results to every connected browser.
 - **Dependencies**: numpy, pykmall, aiohttp. The browser side is plain HTML/JavaScript/CSS with no build step and
   no external libraries.

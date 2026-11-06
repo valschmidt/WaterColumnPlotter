@@ -4,12 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Water Column Plotter</title>
-  <link rel="icon" href="data:,">
+  <link rel="icon" type="image/png" href="/static/favicon.png">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <header id="toolbar">
-    <span class="app-title">Water Column Plotter</span>
+    <span class="brand">
+      <img src="/static/ccom-jhc-logo.png" alt="Center for Coastal and Ocean Mapping / Joint Hydrographic Center, University of New Hampshire" width="32" height="32">
+      <span class="app-title">Water Column Plotter</span>
+    </span>
     <button id="pause" type="button">Pause</button>
     <label class="check" title="Fit the plots to the data as it arrives. Zooming or panning by hand turns this off; double-click a plot to turn it back on."><input type="checkbox" id="autozoom" checked> Auto-zoom</label>
     <label class="check" title="Faint grid lines at the axis ticks."><input type="checkbox" id="grid" checked> Grid</label>
@@ -28,9 +31,92 @@
     <label class="check" title="Keep each plot's color scale at the 10th to 90th percentile of its data. Adjusting a scale by hand turns this off."><input type="checkbox" id="autolevels" checked> Auto levels</label>
     <button id="settings-toggle" type="button" aria-expanded="false" aria-controls="settings">Settings</button>
     <span id="status" class="status">Connecting…</span>
+    <button id="about-open" type="button" aria-haspopup="dialog">About</button>
   </header>
 
-  <form id="settings" hidden title="Processing settings are shared: changing them changes the display for everyone viewing this plotter.">
+  <dialog id="browser" aria-labelledby="browser-title">
+    <h2 id="browser-title">Choose a recording to replay</h2>
+    <p class="about-sub">Files on the plotter's computer. Choose a .kmall or .kmwcd file to play it.</p>
+    <div class="browser-path">
+      <button id="browser-up" type="button" title="Parent directory" aria-label="Parent directory">↑</button>
+      <input id="browser-dir" type="text" aria-label="Directory" autocomplete="off" spellcheck="false" title="Type a directory and press Enter to go there.">
+    </div>
+    <ul id="browser-list" class="browser-list" role="listbox" aria-label="Directories and recordings"></ul>
+    <p id="browser-error" class="source-error"></p>
+    <form method="dialog" class="browser-buttons"><button type="submit">Cancel</button></form>
+  </dialog>
+
+  <dialog id="about" aria-labelledby="about-title">
+    <div class="about-head">
+      <img src="/static/ccom-jhc-logo.png" alt="" width="72" height="72">
+      <div>
+        <h2 id="about-title">Water Column Plotter</h2>
+        <p class="about-sub">Real-time display of multibeam sonar water column data</p>
+      </div>
+    </div>
+    <p>Copyright © 2021–2026 University of New Hampshire, Center for Coastal and Ocean Mapping / Joint Hydrographic Center.
+      Distributed under the BSD 3-Clause License (see the <code>LICENSE</code> file); redistributions must keep this
+      copyright notice.</p>
+    <h3>Contributors</h3>
+    <ul>
+      <li><strong>Lynette Davis</strong>: the original Water Column Plotter (2021–2022).</li>
+      <li><strong>Val Schmidt</strong>: the browser version and its experimental features; maintainer.</li>
+      <li><strong>Roland Arsenault</strong>: the scattering layer tracking approach, from his
+        <a href="https://github.com/rolker/watercolumn_layer_tracker" target="_blank" rel="noopener">watercolumn_layer_tracker</a>.</li>
+      <li><strong>Jose Cordero Ros</strong>: the thermocline tracking and cast alert method, from his MS thesis
+        <a href="https://scholars.unh.edu/cgi/viewcontent.cgi?article=2245&amp;context=thesis" target="_blank" rel="noopener"><cite>Improved Sound Speed Control Through Remotely Detecting Strong Changes in the Thermocline</cite></a>
+        (University of New Hampshire, 2018).</li>
+      <li><strong>Claude</strong> (Anthropic): AI coding assistant, contributor to the browser version.</li>
+    </ul>
+    <p class="about-sub">Kongsberg datagrams are read with <a href="https://pypi.org/project/pykmall/" target="_blank" rel="noopener">pykmall</a>.</p>
+    <form method="dialog"><button type="submit" autofocus>Close</button></form>
+  </dialog>
+
+  <div id="source-bar" class="bar" data-mode="realtime" title="Where the data comes from. Shared: changing it changes the display for everyone viewing this plotter, and clears it.">
+    <span class="source-label">Source</span>
+    <span class="segmented" role="group" aria-label="Data source">
+      <button type="button" data-mode="realtime" aria-pressed="true" title="Plot datagrams from the sonar (or SIS / K-Controller) as they arrive over UDP.">Real-time</button>
+      <button type="button" data-mode="replay" aria-pressed="false" title="Plot a recorded .kmall / .kmwcd file, chosen in a file browser. Real-time data is ignored while replaying.">Replay</button>
+    </span>
+
+    <span id="realtime-controls" class="mode-controls">
+      <span id="realtime-summary" class="source-summary"></span>
+      <span id="realtime-state" class="source-state"></span>
+      <button id="realtime-config-toggle" type="button" aria-expanded="false" aria-controls="realtime-config">Configure…</button>
+    </span>
+
+    <span id="replay-controls" class="mode-controls" hidden>
+      <button id="replay-browse" type="button" title="Choose a recorded file in another directory.">Browse…</button>
+      <select id="replay-file" aria-label="Recorded file" title="Recorded files in the same directory. Choosing one plays it from the start, clearing the display."></select>
+      <button id="replay-play" type="button" disabled>Play</button>
+      <label title="Playback speed relative to the recording. Max plays as fast as the data can be processed.">Speed
+        <select id="replay-speed" disabled>
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+          <option value="5">5×</option>
+          <option value="10">10×</option>
+          <option value="0">Max</option>
+        </select></label>
+      <input id="replay-position" type="range" min="0" max="1" step="any" value="0" disabled aria-label="Position in the recording" title="Position in the recording. Moving it restarts the display from there.">
+      <span id="replay-time" class="source-state"></span>
+    </span>
+    <span id="source-error" class="source-error"></span>
+    <span id="mode-badge" class="mode-badge">Real-time</span>
+  </div>
+
+  <form id="realtime-config" class="bar config" hidden title="Real-time source. Shared: applies for everyone viewing this plotter.">
+    <fieldset>
+      <legend>Real-time source: UDP</legend>
+      <label title="Local address to receive on: 0.0.0.0 for every interface. With multicast, the interface to join the group on.">Listen address<input name="udpIp" type="text" inputmode="decimal" autocomplete="off"></label>
+      <label title="UDP port SIS / K-Controller sends datagrams to.">Port<input name="udpPort" type="number" step="1" min="1" max="65535"></label>
+      <label title="Multicast group to join, if the data is sent to one (e.g. 225.255.255.255). Leave empty for unicast or broadcast.">Multicast group<input name="multicast" type="text" inputmode="decimal" autocomplete="off" placeholder="none"></label>
+    </fieldset>
+    <button type="submit" title="Restart the receiver on this address.">Apply</button>
+  </form>
+
+
+  <form id="settings" class="bar" hidden title="Processing settings are shared: changing them changes the display for everyone viewing this plotter.">
     <div class="groups">
       <fieldset>
         <legend title="Each sample is placed in a grid of square cells, the same size across-track and in depth. The grid grows to cover the data.">Pie grid</legend>

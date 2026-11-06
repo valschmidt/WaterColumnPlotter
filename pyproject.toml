@@ -6,7 +6,9 @@ build-backend = "setuptools.build_meta"
 name = "WaterColumnPlotter"
 version = "0.0.1"
 description = "Package for real-time water column data visualization."
-authors = [{ name = "Lynette Davis", email = "ldavis@ccom.unh.edu" }]
+authors = [{ name = "Lynette Davis", email = "ldavis@ccom.unh.edu" }, { name = "Val Schmidt", email = "Val.Schmidt@unh.edu" }]
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 keywords = ["hydrography", "ocean mapping", "sonar", "hydrographic survey", "water column"]
 requires-python = ">=3.10"
 dependencies = [
@@ -40,4 +42,4 @@ include = ["WaterColumnPlotter*"]
 [tool.setuptools.package-data]
 "WaterColumnPlotter.GUI.Settings" = ["*.json"]
 "WaterColumnPlotter.GUI.Dialogs.UIFiles" = ["*.ui"]
-"WaterColumnPlotter.Web.static" = ["*.html", "*.js", "*.css"]
+"WaterColumnPlotter.Web.static" = ["*.html", "*.js", "*.css", "*.png"]

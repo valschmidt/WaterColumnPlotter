@@ -36,7 +36,9 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
-.app-title { font-weight: 600; margin-right: 8px; }
+.brand { display: inline-flex; align-items: center; gap: 8px; margin-right: 8px; }
+.brand img { display: block; width: 32px; height: 32px; }
+.app-title { font-weight: 600; }
 
 button {
   font: inherit;
@@ -52,13 +54,20 @@ button[aria-pressed="true"] { background: var(--accent); color: #0b1220; }
 
 .check { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
 
-.status { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.status {
+  flex: 1 1 0;
+  min-width: 0;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
 .status.error { color: var(--error); }
 
 #settings {
   padding: 6px 12px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
 }
 #settings .groups {
   display: flex;
@@ -162,3 +171,168 @@ select {
 }
 #settings label select { margin-left: auto; }
 #toolbar label:not(.check) { display: inline-flex; align-items: center; gap: 4px; }
+
+/* Source bar, its configuration menus and the settings panel: a tinted background so they stand out. */
+:root { --bar-bg: #1d2a3d; --bar-border: #34507a; --realtime: #3ddc84; --replay: #ffb547; --status-replay: #6cb4ff; }
+.bar { background: var(--bar-bg); border-bottom: 1px solid var(--bar-border); }
+#source-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 4px 12px;
+  border-left: 4px solid var(--realtime);
+}
+#source-bar[data-mode="replay"] { border-left-color: var(--replay); }
+/* Source status: plain colored text with a dot, so it doesn't read as a button. */
+.mode-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--realtime);
+  white-space: nowrap;
+}
+.mode-badge::before {
+  content: '';
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: currentColor;
+}
+#source-bar[data-mode="replay"] .mode-badge { color: var(--status-replay); }
+.mode-badge.idle { color: var(--muted); }
+.source-label { font-weight: 600; }
+.segmented { display: inline-flex; }
+.segmented button { border-radius: 0; }
+.segmented button:first-child { border-radius: 4px 0 0 4px; }
+.segmented button:last-child { border-radius: 0 4px 4px 0; border-left: none; }
+.segmented button[data-mode="realtime"][aria-pressed="true"] { background: var(--realtime); color: #0b1220; }
+.segmented button[data-mode="replay"][aria-pressed="true"] { background: var(--replay); color: #0b1220; }
+.mode-controls { display: contents; }
+.mode-controls[hidden] { display: none; }
+#source-bar label { display: inline-flex; align-items: center; gap: 4px; }
+.source-summary { font-variant-numeric: tabular-nums; }
+.source-state { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.source-state.ok { color: var(--realtime); }
+.source-error { color: var(--error); }
+.source-error:empty { display: none; }
+#replay-file { max-width: min(360px, 100%); }
+#replay-position { flex: 1; min-width: 120px; }
+.config {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 12px;
+}
+.config fieldset {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin: 0;
+  padding: 2px 8px 6px;
+  border: 1px solid var(--bar-border);
+  border-radius: 4px;
+}
+.config[hidden] { display: none; }
+.config legend { padding: 0 4px; font-weight: 600; }
+.config label { display: inline-flex; align-items: center; gap: 6px; }
+.config input[type="text"], .config input[type="number"] {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 4px;
+  width: 130px;
+}
+.config input.wide { width: min(480px, 70vw); }
+#settings fieldset { border-color: var(--bar-border); }
+/* Apply button of a form with changes not yet applied: color only, so its size and place don't change. */
+button.dirty {
+  background: var(--replay);
+  color: #0b1220;
+  border-color: var(--replay);
+  animation: dirty-pulse 1.6s ease-in-out infinite;
+}
+@keyframes dirty-pulse { 50% { box-shadow: 0 0 0 3px rgba(255, 181, 71, 0.35); } }
+@media (prefers-reduced-motion: reduce) { button.dirty { animation: none; } }
+button:disabled { opacity: 0.5; cursor: default; }
+button:disabled:hover { border-color: var(--border); }
+
+/* About dialog */
+#about {
+  max-width: min(560px, calc(100vw - 32px));
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--bar-border);
+  border-radius: 8px;
+  padding: 18px 22px;
+  line-height: 1.5;
+}
+#about::backdrop { background: rgba(0, 0, 0, 0.55); }
+.about-head { display: flex; align-items: center; gap: 14px; }
+.about-head img { flex: none; }
+#about h2 { margin: 0; font-size: 18px; }
+#about h3 { margin: 14px 0 4px; font-size: 14px; }
+#about ul { margin: 0; padding-left: 20px; }
+#about li { margin: 3px 0; }
+#about a { color: var(--accent); }
+.about-sub { color: var(--muted); margin: 2px 0; }
+#about form { display: flex; justify-content: flex-end; margin-top: 12px; }
+
+/* Recording browser */
+#browser {
+  width: min(640px, calc(100vw - 32px));
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--bar-border);
+  border-radius: 8px;
+  padding: 16px 20px;
+}
+#browser::backdrop { background: rgba(0, 0, 0, 0.55); }
+#browser h2 { margin: 0 0 2px; font-size: 16px; }
+.browser-path { display: flex; gap: 6px; margin: 10px 0 6px; }
+#browser-dir {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 2px 6px;
+}
+.browser-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  height: min(360px, 50vh);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+}
+.browser-list li button {
+  display: flex;
+  width: 100%;
+  gap: 8px;
+  text-align: left;
+  border: none;
+  border-radius: 0;
+  background: none;
+  padding: 4px 10px;
+}
+.browser-list li button:hover, .browser-list li button:focus-visible { background: #2a3446; outline: none; }
+.browser-list .icon { width: 1.2em; flex: none; color: var(--muted); }
+.browser-list .file .icon { color: var(--status-replay); }
+.browser-list .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browser-list .size { color: var(--muted); font-variant-numeric: tabular-nums; }
+.browser-list .empty { padding: 8px 10px; color: var(--muted); }
+.browser-buttons { display: flex; justify-content: flex-end; margin-top: 10px; }
