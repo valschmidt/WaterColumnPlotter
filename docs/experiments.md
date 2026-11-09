@@ -6,12 +6,13 @@ Ideas being tried on the browser plotter. Some may not be kept.
 
 | Feature | Where | Notes |
 | --- | --- | --- |
-| Faint grid | Toolbar "Grid" (per viewer) | Lines at the axis ticks. |
-| Color maps | Toolbar "Colors": viridis, jet, grayscale (per viewer) | Applies to all plots and histogram color bars. |
+| Faint grid | Settings > Display > Grid (per viewer) | Lines at the axis ticks. |
+| Color maps | Settings > Display > Colors: viridis, jet, grayscale (per viewer) | Applies to all plots and histogram color bars. |
 | Sound speed profile | Strip right of the vertical slice | Latest #SVP, on the vertical slice's depth scale (shifted by the transducer depth when depths are measured from the transducer), with grid lines when the grid is on. The orange dashed line marks the strongest sound speed gradient in view (the velocline); the shaded band is the cast's thermocline, its bottom dashed. |
+| Swath buffer, draggable slices, pie time | Drag the bands on the plots (edges resize, centre lines move); drag the white pie time line on either slice; pie header: Live (per viewer) | Pages keep every swath (up to the swath history) and build the pie and slices from them, so moving a slice recomputes its whole history at once and the pie can show any held swath. See browser-design.md. Tracking still runs on the plotter, under the vessel. |
 | Dual-swath selection | Settings > Pie grid > Swaths: Both / First only / Second only (shared) | Swaths not chosen (by #MWC `swathAlongPosition`, 0 or 1) are skipped before gridding, so the pie and both slices use only the chosen one; along-track averages then count only chosen swaths. Single-swath systems ignore it. The status line shows e.g. "× 2 swaths (first shown)". Changing it clears the display. |
 | Sidelobe suppression | Settings > Pie grid (shared) | See below. Applies before gridding, so the pie and both slices are corrected. |
-| Layer tracking | Toolbar "Tracking: Layers" (per viewer); Settings > Vertical slice > Layer threshold (shared) | `Web/layers.py`, see below. Any number of layers. |
+| Layer tracking | Toolbar "Tracking: Layers" (per viewer); Settings > Tracking > Layer threshold (shared) | `Web/layers.py`, see below. Any number of layers. |
 | Data source: real-time or replay | Source bar under the toolbar: Configure… sets the UDP address; Replay opens the OS Open dialog (the page's own browser for remote viewers); while a file is being indexed, the source badge and the plots say "Opening <file>…" with the seconds so far; `--replay FILE`, `--data-dir DIR` (shared) | `Web/replay.py` plays a recorded file (play/pause, speed, seek). See browser-design.md. |
 | Horizontal slice depth | Horizontal slice header: Amplitude / Depth / Depth, shaded (per viewer) | See below. |
 | Thermocline tracking and cast alert | Toolbar "Tracking: Thermocline" (per viewer); Settings > Thermocline (shared) | `Web/thermocline.py`, after Cordero Ros (2018), see below. One feature: the thermocline bottom. |
@@ -122,8 +123,7 @@ Also tried and dropped: the depth of the strongest cell in the band (in the colu
 spanned the band (9.1-10.9 m in the 9-11 m band) but stepped by the cell size and was mostly noise.
 
 In the depth modes the color scale's range is the band itself (the only depths possible), and levels are kept
-inside it. Changing the slice depth or thickness resets the scale to the new band; columns recorded before the change
-keep their old band's depths (slice settings apply to new data), and fall outside the scale until they scroll out.
+inside it. Moving or resizing the band resets the scale to the new band, and recomputes the whole history.
 
 ### Layer tracking
 

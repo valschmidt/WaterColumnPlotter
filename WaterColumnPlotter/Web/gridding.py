@@ -1,5 +1,5 @@
 """
-Gridding of Kongsberg #MWC water column datagrams, and the slice geometry used for display.
+Gridding of Kongsberg #MWC water column datagrams, and the across-track band of the tracking column.
 
 Cells are square, bin_size metres on a side:
 - row r covers depth [r * bin_size, (r + 1) * bin_size), depth positive down, measured from the transducer's resting
@@ -158,18 +158,11 @@ def grid_mwc(dg, bin_size, depth_offset=0.0, sidelobe_suppression='off', backgro
 
 
 def vertical_band(settings):
-    """Columns [c0, c1) averaged for the vertical slice: across-track within +/- acrossTrackAvg_m / 2."""
+    """Columns [c0, c1) averaged for the tracking column under the vessel: across-track within +/- acrossTrackAvg_m / 2."""
     b = settings['binSize_m']
     half = settings['acrossTrackAvg_m'] / 2
     c0 = int(np.floor(-half / b))
     return c0, max(c0 + 1, int(np.ceil(half / b)))
-
-
-def horizontal_band(settings):
-    """Rows [r0, r1) averaged for the horizontal slice: sliceDepth_m +/- sliceThickness_m / 2."""
-    b = settings['binSize_m']
-    r0 = int(np.floor((settings['sliceDepth_m'] - settings['sliceThickness_m'] / 2) / b))
-    return r0, max(r0 + 1, int(np.ceil((settings['sliceDepth_m'] + settings['sliceThickness_m'] / 2) / b)))
 
 
 def add_blocks(a, b):

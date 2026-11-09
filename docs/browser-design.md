@@ -91,11 +91,22 @@ Gridding follows the Qt version's geometry, with two bugs fixed.
   indices repeat. The cell therefore held a single sample, not the sum and count. We use `np.bincount`.
 - **Fixed:** beams with fewer samples than the bottom-detect range were padded with NaN, and the NaNs were added
   into the grid, erasing those cells. We only use samples that exist.
-- **Pie**: average of the last `alongTrackAvg_swath` swaths.
-- **Vertical slice column**: per depth row, average over the across-track band `|y| <= acrossTrackAvg_m / 2`.
-- **Horizontal slice column**: per across-track column, average over the depth band
-  `sliceDepth_m ± sliceThickness_m / 2`.
-- Slice columns are averaged along track in blocks of `alongTrackAvg_swath` swaths. Counts throughout (along-track
+- **Swath buffer**: each completed swath (its datagrams summed: one per receive head) goes to the pages as its mean
+  level per cell, cropped to its data and quantized to one byte per cell (`base + q * step` dB; the step is the
+  swath's range over 254 levels, 0.5 dB for Kongsberg's 127 dB sample range, finer for a smaller range; 255 = no
+  data). Each page keeps the last `historySwaths` swaths and builds all three plots from them, so slice positions
+  and the pie's time are the viewer's own and change without asking the plotter. The plotter keeps the same history
+  to send pages that connect later.
+- **Pie**: average of `alongTrackAvg_swath` swaths ending at the chosen swath, or the newest (Live).
+- **Vertical slice column**: per depth row, average over the viewer's across-track band (cells, weighted by
+  count).
+- **Horizontal slice column**: per across-track column, average over the viewer's depth band; or the
+  amplitude-weighted depth in the band, where the swath covers all of it.
+- **Tracking column** (layers, thermocline): on the plotter, per depth row, average over the band
+  `|y| <= acrossTrackAvg_m / 2` under the vessel. It doesn't follow the viewer's vertical slice.
+- Slice and tracking columns average along track in groups of `alongTrackAvg_swath` swaths, by swath number
+  (`seq`, from 0 after each reset): group k is swaths k * A to (k + 1) * A - 1, so groups don't shift as data
+  arrives, and tracking results line up with the slice columns. Counts throughout (along-track
   average, swath history, background swaths) are of swaths, not ping cycles: a dual-swath system transmits two swaths
   per ping cycle, pointing in different directions, under one `pingCnt`. A swath is `(pingCnt, swathAlongPosition)`;
   an odd count is allowed and splits a ping cycle. (The Qt version counted datagrams, which is the same for
@@ -106,18 +117,33 @@ Gridding follows the Qt version's geometry, with two bugs fixed.
 | Kind | Settings | Scope |
 | --- | --- | --- |
 | Network | UDP address, port, multicast group, HTTP port | Command-line arguments |
-| Processing | cell size, reference to water surface, heave allowance, slice depth, slice thickness, across-track width, along-track average, swath history | Server: shared by all viewers |
-| Display | zoom, pan, auto-zoom, color scale, pause | Browser: per viewer |
+| Processing | cell size, reference to water surface, heave allowance, swaths, sidelobe suppression, tracking width, along-track average, swath history, history memory | Server: shared by all viewers |
+| Display | slice positions and widths, the pie's time (Live or a chosen swath), zoom, pan, auto-zoom, color scale, and Settings > Display (grid, colors, combine) | Browser: per viewer; slice positions are kept in the browser's storage |
 
 Changing a processing setting applies to everyone, and every connected page shows the new value. Changing the cell size,
-depth reference, transducer depth (from #IIP) or the along-track average clears the history, since earlier data was gridded or averaged differently. Changing the slice settings applies to new data only.
+depth reference, transducer depth (from #IIP), along-track average, swaths or sidelobe suppression clears the
+history, since earlier data was gridded or averaged differently. Moving a slice recomputes it over the whole history.
 
-The settings form groups settings by the plot they affect (pie grid, horizontal slice, vertical slice, all plots),
+The settings form groups settings by the plot they affect (pie grid, depth, tracking, thermocline, all plots),
 with explanations in tooltips. Names in the form versus the settings keys: cell size = `binSize_m`,
 swath history = `historySwaths`.
 
-Possible later change: keep each datagram's grid (cropped to its data, roughly 0.3 MB) so slices can be recomputed
-for the whole history, or cut per viewer.
+Memory: a swath takes about one byte per cell it covers, about 60 kB at 0.2 m cells in 25 m of water, so the default
+5000-swath history is about 300 MB in each page and in the plotter. A swath's grid grows as (depth / cell size)²,
+so the history is also limited by memory:
+
+- **History memory** (`historyMemory_MB`, default 500 MB, shared): the plotter and each page keep the newest swaths
+  that fit in both the swath history and this budget; the status line adds "memory limit" when the budget is what
+  limits it.
+- **One swath** may cover at most 2 million cells (`gridding.MAX_CELLS`); larger ones are skipped, with a warning.
+- **Receiver to worker**: at most 100 complete datagrams wait (`DG_QUEUE_MAX`); when processing can't keep up, new
+  ones are dropped and counted (`behind`), and the status line warns.
+- **Plotter to pages**: each page has its own send queue and task, so a slow page doesn't hold up the others. The
+  history is sent to a page that connects in frames of at most 16 MB, built as they are sent. A page that stays
+  behind (over 64 MB waiting for over 10 s, or over 512 MB at any time) is disconnected, with the reason shown; it
+  reconnects and catches up from the history.
+ At 5000 swaths, moving a slice band takes about
+80 ms (amplitude) to 140 ms (depth mode) to recompute, and each update about 40 ms.
 
 ## Display (requirements from review of the Qt version)
 
@@ -138,19 +164,33 @@ for the whole history, or cut per viewer.
   heave allowance above 0 m.
 - Horizontal and vertical slices: with auto-zoom on, the x-axis spans the full history and the newest ping stays at
   the right edge, so new data scrolls in from the right at a constant scale.
-- The horizontal slice's depth band and the vertical slice's across-track band are drawn on the pie.
-- Controls are labelled "Slice depth" and "Slice thickness" (the Qt version's "Depth" and "Depth avg").
+- Draggable indicators. The horizontal slice's depth band (magenta) is drawn on the pie and the vertical slice;
+  the vertical slice's across-track band (cyan) on the pie and the horizontal slice. Dragging a band's dashed edge
+  widens or narrows it about its centre, its centre line moves it (a band under 16 px: inside moves it, just outside
+  an edge resizes it), snapped to cell edges. The pie's time (white line, over the swaths it
+  averages) is drawn on both slices; dragging it steps the pie through the history, and dragging it to the newest
+  end, or the pie's Live button, follows new data again. The readout names the indicator under the mouse.
+- More data than pixels: when a plot's image has more columns (or rows) than device pixels at the current zoom, N
+  per pixel (rounded), they are combined before coloring, by the mean or the maximum of the values present, or by
+  decimation (the value nearest each group's middle; Settings > Display > Combine, per viewer; depths by the mean when Max is
+  chosen), in groups counted from grid indices so they don't
+  shift as the slices scroll. The plot shows "1:N" in yellow at its bottom right, with the tooltip "1 px = N columns
+  at this zoom level". Combining is redone from the full image when zooming changes N, not from the history, so
+  zooming in shows full detail. Not done yet: keeping pre-combined copies at several resolutions (wait for
+  feedback on whether zooming is fast enough without them).
 - Cursor readout: position and value under the mouse.
 
 ## Data to the browser
 
-- On connect, the server sends the settings, the current pie and the slice history.
-- Then once per update interval (default 1 s), it sends the new pie and only the slice columns added since the last
-  update. Each browser keeps its own slice history (default 2500 pings).
-- Binary WebSocket frames: a small JSON header (type, shape, geometry) followed by float32 data, NaN for empty cells.
-  Each slice column covers only its data and carries the grid index of its first value.
-  The pie is cropped to its data extent. At 18 datagrams/s with along-track averaging of 5, that is about 30 kB/s per
-  viewer plus the pie (about 0.2 MB per update).
+- On connect, the server sends the settings, then the swaths it holds (in frames of 200), the tracking results,
+  the cast and the source.
+- Then once per update interval (default 1 s), the swaths completed since the last update and their tracking
+  results. A swath is complete when the next one starts, or after 0.5 s without data.
+- Swath frames are binary: uint32 header length, JSON header `{type: 'swaths', swaths: [{seq, t, ping, pos, row0,
+  col0, rows, cols, base, step}]}`, then each swath's rows x cols bytes. Tracking results are JSON:
+  `{type: 'tracks', tracks: [{seq0, seq1, t, layers, thermo}]}`.
+- At 18 swaths/s and about 60 kB each, about 1.1 MB/s per viewer, and about 300 MB for a page connecting to a full
+  5000-swath history.
 
 ## Open questions
 

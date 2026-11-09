@@ -12,31 +12,38 @@ import collections
 import ipaddress
 import json
 import logging
-import math
 import multiprocessing
 import os
 import queue
 import signal
 import struct
+import time
 import webbrowser
 from pathlib import Path
 
 import numpy as np
-from aiohttp import WSMsgType, web
+from aiohttp import WSCloseCode, WSMsgType, web
 
 from WaterColumnPlotter.Web import filedialog, gridding, receiver, replay, worker
 
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / 'static'
+# Memory protection
+FRAME_MAX_BYTES = 16 * 2 ** 20  # largest frame of swaths sent to a page catching up with the history
+DG_QUEUE_MAX = 100              # complete datagrams waiting for the worker; beyond this the receiver drops them
+# A page is disconnected if it stays behind: more than CLIENT_MAX_PENDING bytes waiting to be sent to it, with data
+# waiting for more than CLIENT_MAX_LAG_S; or, whatever the time, more than CLIENT_HARD_PENDING bytes.
+CLIENT_MAX_PENDING = 64 * 2 ** 20
+CLIENT_MAX_LAG_S = 10.0
+CLIENT_HARD_PENDING = 512 * 2 ** 20
 
 DEFAULT_SETTINGS = {
     'binSize_m': 0.2,
-    'acrossTrackAvg_m': 10.0,
-    'sliceDepth_m': 10.0,
-    'sliceThickness_m': 2.0,
+    'acrossTrackAvg_m': 10.0,    # tracking column: width of the band under the vessel
     'alongTrackAvg_swath': 10,
     'historySwaths': 5000,
+    'historyMemory_MB': 500,     # the most memory the swath history may use, in the plotter and in each page
     'referenceToSurface': False,
     'transducerDepth_m': None,  # below the waterline; set from #IIP when one is received (None: not yet known)
     'heaveAllowance_m': 1.0,    # room shown above 0 m when depths are measured from the transducer
@@ -56,10 +63,9 @@ DEFAULT_SETTINGS = {
 SETTING_LIMITS = {
     'binSize_m': (float, 0.01, 10.0),
     'acrossTrackAvg_m': (float, 0.01, 10000.0),
-    'sliceDepth_m': (float, 0.0, 12000.0),
-    'sliceThickness_m': (float, 0.01, 1000.0),
     'alongTrackAvg_swath': (int, 1, 100),
     'historySwaths': (int, 10, 100000),
+    'historyMemory_MB': (int, 50, 16000),
     'referenceToSurface': (bool, False, True),
     'transducerDepth_m': (float, -100.0, 100.0),
     'heaveAllowance_m': (float, 0.0, 50.0),
@@ -90,24 +96,94 @@ def validate_settings(current, requested):
     return new
 
 
-def history_columns(settings):
-    """Number of slice columns kept: each column averages alongTrackAvg_swath swaths."""
-    return math.ceil(settings['historySwaths'] / settings['alongTrackAvg_swath'])
+def swaths_frame(swaths):
+    """
+    Binary WebSocket frame of encoded swaths (worker.encode_swath): uint32 header length, JSON header
+    {'type': 'swaths', 'swaths': [meta, ...]}, then each swath's rows x cols bytes in turn.
+    """
+    head = json.dumps({'type': 'swaths', 'swaths': [meta for meta, _ in swaths]}).encode()
+    return struct.pack('<I', len(head)) + head + b''.join(data for _, data in swaths)
 
 
-def frame(header, *arrays):
-    """Binary WebSocket frame: uint32 header length, JSON header, padding to 4 bytes, then float32 arrays."""
-    head = json.dumps(header).encode()
-    head += b' ' * (-(4 + len(head)) % 4)
-    return struct.pack('<I', len(head)) + head + b''.join(np.ascontiguousarray(a, '<f4').tobytes() for a in arrays)
+class Client:
+    """
+    One connected page, with a queue of messages for it sent by its own task (run). If the page stays behind (see
+    CLIENT_MAX_PENDING), it is disconnected (it reconnects and catches up from the history), rather than letting
+    its queue fill memory or holding up the other pages. One large update alone doesn't count as falling behind.
+    """
+
+    def __init__(self, ws, remote):
+        self.ws = ws
+        self.remote = remote
+        self.queue = collections.deque()  # str or bytes messages, or ('history', swaths) to send in frames
+        self.pending = 0  # bytes of the messages queued (the history isn't counted: it is held anyway)
+        self.waiting_since = None  # when data began waiting to be sent (None: everything sent)
+        self.wake = asyncio.Event()
+        self.dropped = False
+
+    def send(self, message):
+        if self.dropped:
+            return
+        now = time.monotonic()
+        if self.waiting_since is None:
+            self.waiting_since = now
+        self.queue.append(message)
+        self.pending += len(message)
+        self.wake.set()
+        lagging = now - self.waiting_since > CLIENT_MAX_LAG_S
+        if self.pending > CLIENT_HARD_PENDING or (self.pending > CLIENT_MAX_PENDING and lagging):
+            self.dropped = True
+            logger.warning("Disconnecting %s: it isn't keeping up (%.0f MB waiting to be sent)", self.remote,
+                           self.pending / 1e6)
+            asyncio.get_running_loop().create_task(self.ws.close(
+                code=WSCloseCode.TRY_AGAIN_LATER, message=b"This connection can't keep up with the data"))
+
+    def send_history(self, swaths):
+        self.queue.append(('history', swaths))
+        self.wake.set()
+
+    async def run(self):
+        try:
+            while not self.dropped:
+                await self.wake.wait()
+                self.wake.clear()
+                while self.queue and not self.dropped:
+                    message = self.queue.popleft()
+                    if isinstance(message, tuple):
+                        await self.send_frames(message[1])
+                        continue
+                    self.pending -= len(message)
+                    if isinstance(message, str):
+                        await self.ws.send_str(message)
+                    else:
+                        await self.ws.send_bytes(message)
+                if not self.queue:
+                    self.waiting_since = None
+        except (ConnectionError, RuntimeError):
+            pass  # the page went away
+
+    async def send_frames(self, swaths):
+        frame, size = [], 0
+        for swath in swaths:
+            if frame and size + len(swath[1]) > FRAME_MAX_BYTES:
+                await self.ws.send_bytes(swaths_frame(frame))
+                frame, size = [], 0
+            frame.append(swath)
+            size += len(swath[1])
+        if frame:
+            await self.ws.send_bytes(swaths_frame(frame))
 
 
 class Server:
     def __init__(self, args):
         self.args = args
         self.settings = dict(DEFAULT_SETTINGS)
-        self.history = collections.deque(maxlen=history_columns(self.settings))  # (time, vertical, horizontal)
-        self.pie = None
+        # The most recent swaths, (meta, bytes) as the worker encoded them, and tracking results, for pages that
+        # connect later: each page keeps the same history and builds its plots from it.
+        # Kept to the swath history and its memory budget (trim_history).
+        self.swaths = collections.deque()
+        self.swath_bytes = 0
+        self.tracks = collections.deque()
         self.svp = None  # latest sound speed profile message
         # Data source: real-time UDP (the receiver's address) or replay of a recorded file (dataDir: the directory of
         # the last file opened, where browsing starts). The mode and the file being replayed are the worker's ('source'
@@ -121,7 +197,7 @@ class Server:
         self.dialog_open = False  # the native Open dialog is showing
 
         self.ctx = ctx = multiprocessing.get_context('spawn')
-        self.dg_queue = ctx.Queue()
+        self.dg_queue = ctx.Queue(maxsize=DG_QUEUE_MAX)
         self.settings_queue = ctx.Queue()
         self.result_queue = ctx.Queue()
         self.control_queue = ctx.Queue()  # source commands for the worker
@@ -143,39 +219,27 @@ class Server:
         return json.dumps({**self.source, 'type': 'source', 'config': self.source_config, 'opening': self.opening})
 
     def settings_message(self):
-        # Grid columns / rows averaged for the slices, so pages can draw them exactly as the worker uses them.
-        bands = {'vertical': gridding.vertical_band(self.settings),
-                 'horizontal': gridding.horizontal_band(self.settings)}
-        return json.dumps({'type': 'settings', 'settings': self.settings, 'grid': bands})
-
-    def columns_frame(self, columns):
-        # Each column covers only its data: vertical values start at grid row v[0], horizontal at grid column h[0].
-        header = {'type': 'columns', 'count': len(columns), 'times': [c[0] for c in columns],
-                  'v': [[c[1][0], len(c[1][1])] for c in columns],
-                  'h': [[c[2][0], len(c[2][1])] for c in columns],
-                  'hz': [[c[5][0], len(c[5][1])] for c in columns],
-                  'layers': [c[3] for c in columns], 'thermocline': [c[4] for c in columns]}
-        return frame(header, *[c[1][1] for c in columns], *[c[2][1] for c in columns],
-                     *[c[5][1] for c in columns])
-
-    def pie_frame(self):
-        data, row0, col0 = self.pie
-        return frame({'type': 'pie', 'rows': data.shape[0], 'cols': data.shape[1], 'row0': row0, 'col0': col0},
-                     data)
+        return json.dumps({'type': 'settings', 'settings': self.settings})
 
     async def broadcast(self, message):
-        for ws in list(self.clients):
-            try:
-                if isinstance(message, str):
-                    await ws.send_str(message)
-                else:
-                    await ws.send_bytes(message)
-            except (ConnectionError, RuntimeError):
-                self.clients.discard(ws)
+        # Queued for each page and sent by its own task, so a slow page doesn't hold up the others.
+        for client in list(self.clients):
+            client.send(message)
 
     def clear(self):
-        self.history.clear()
-        self.pie = None
+        self.swaths.clear()
+        self.swath_bytes = 0
+        self.tracks.clear()
+
+    def trim_history(self):
+        """Keep the newest swaths within both the swath history and its memory budget; tracking goes with them."""
+        s = self.settings
+        budget = s['historyMemory_MB'] * 1e6
+        while self.swaths and (len(self.swaths) > s['historySwaths'] or self.swath_bytes > budget):
+            self.swath_bytes -= len(self.swaths.popleft()[1])
+        oldest = self.swaths[0][0]['seq'] if self.swaths else None
+        while self.tracks and (oldest is None or self.tracks[0]['seq1'] < oldest):
+            self.tracks.popleft()
 
     # ----- Worker results -----
 
@@ -218,12 +282,14 @@ class Server:
                     await self.change_settings({'transducerDepth_m': msg['transducerDepth_m']})
             elif msg['type'] == 'update':
                 self.stats = msg['stats']
-                if msg['columns']:
-                    self.history.extend(msg['columns'])
-                    await self.broadcast(self.columns_frame(msg['columns']))
-                if msg['pie'] is not None:
-                    self.pie = msg['pie']
-                    await self.broadcast(self.pie_frame())
+                if msg['swaths']:
+                    self.swaths.extend(msg['swaths'])
+                    self.swath_bytes += sum(len(data) for _, data in msg['swaths'])
+                    self.trim_history()
+                    await self.broadcast(swaths_frame(msg['swaths']))
+                if msg['tracks']:
+                    self.tracks.extend(msg['tracks'])
+                    await self.broadcast(json.dumps({'type': 'tracks', 'tracks': msg['tracks']}))
                 await self.broadcast(json.dumps({'type': 'stats', 'stats': self.stats}))
 
     # ----- HTTP / WebSocket handlers -----
@@ -275,21 +341,25 @@ class Server:
     async def websocket(self, request):
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
-        self.clients.add(ws)
-        await ws.send_str(self.settings_message())
-        if self.history:
-            await ws.send_bytes(self.columns_frame(list(self.history)))
-        if self.pie is not None:
-            await ws.send_bytes(self.pie_frame())
+        # Everything for this page goes through its queue, in order: the settings, the history held now (sent in
+        # frames built as they go, so it isn't copied all at once), then what arrives meanwhile.
+        client = Client(ws, request.remote)
+        client.send(self.settings_message())
+        client.send_history(list(self.swaths))
+        if self.tracks:
+            client.send(json.dumps({'type': 'tracks', 'tracks': list(self.tracks)}))
         if self.svp is not None:
-            await ws.send_str(self.svp)
-        await ws.send_str(self.source_message())
+            client.send(self.svp)
+        client.send(self.source_message())
+        self.clients.add(client)
+        sender = asyncio.create_task(client.run())
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
                     await self.handle_client_message(json.loads(msg.data))
         finally:
-            self.clients.discard(ws)
+            self.clients.discard(client)
+            sender.cancel()
         return ws
 
     async def handle_client_message(self, msg):
@@ -346,7 +416,10 @@ class Server:
             old = self.receiver
             old.terminate()
             await asyncio.to_thread(old.join, 2)
-            self.dg_queue.put(('stats', {}))  # forget the old receiver's counts (and any error)
+            try:
+                self.dg_queue.put_nowait(('stats', {}))  # forget the old receiver's counts (and any error)
+            except queue.Full:
+                pass
             self.receiver = self.new_receiver()
             self.receiver.start()
         await self.broadcast(self.source_message())
@@ -358,7 +431,7 @@ class Server:
             return
         reset = any(new[k] != self.settings[k] for k in worker.RESET_SETTINGS)
         self.settings = new
-        self.history = collections.deque(self.history, maxlen=history_columns(new))
+        self.trim_history()
         self.settings_queue.put(new)
         await self.broadcast(self.settings_message())
         if reset:
@@ -380,8 +453,8 @@ class Server:
     async def on_shutdown(self, app):
         # Close browser connections first; otherwise the server waits for them before shutting down.
         app['relay'].cancel()
-        for ws in list(self.clients):
-            await ws.close(code=1001, message=b'Server shutting down')
+        for client in list(self.clients):
+            await client.ws.close(code=WSCloseCode.GOING_AWAY, message=b'Server shutting down')
 
     async def on_cleanup(self, app):
         for p in (self.receiver, self.worker):

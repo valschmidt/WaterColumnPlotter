@@ -13,6 +13,26 @@ Nothing yet.
 ## 2026-11-09
 
 ### Added
+- **Drag the slices on the plots.** The horizontal slice's depth band (magenta) appears on the pie and the vertical
+  slice, and the vertical slice's across-track band (cyan) on the pie and the horizontal slice. Drag a band's dashed
+  edge to widen or narrow it about its centre, or its centre line to move it (on a thin band: drag inside it to move
+  it, just outside an edge to resize it), and the slice is redrawn over its whole history at once, without starting
+  over. Each viewer has their own slice positions, remembered by the browser.
+- **Look back in time in the pie.** A white line on both slices marks the swaths the pie shows. Drag it to show
+  earlier swaths, while new data keeps arriving; the pie's header shows the time and how far back. Click **Live**, or
+  drag the line back to the newest end, to follow new data again.
+- **"1:N" in yellow** at a plot's bottom right when it has more columns (or rows) of data than screen pixels at the
+  current zoom, so N of them share each pixel; its tooltip says so. They are combined by **Combine** (Settings > Display):
+  Mean (the default) averages them, Max shows the strongest, so a target in a single column isn't averaged away, and
+  Decimate shows one and skips the rest, as plots did before. Zooming in shows full detail again.
+- **The status line shows the history held**, e.g. "holding 5000 swaths (300 MB)".
+- **Protection against running out of memory**, for example with very small cells or in deep water:
+  - **History memory** (Settings > All plots, default 500 MB) limits the memory the history takes in the plotter and
+    in each page. When it is the limit, the oldest swaths are dropped and the status line says "memory limit".
+  - If processing can't keep up with the data, new datagrams are dropped instead of piling up, and the status line
+    says how many.
+  - A page that can't keep up with the data (for example over a slow network) no longer holds up the others: it is
+    disconnected, told why, and reconnects.
 - **Choose the first swath, the second, or both** (Settings > Pie grid > Swaths) on dual-swath systems. The other
   swath is left out of the pie, both slices and the averages. First and second are in time within each ping cycle.
   The status line shows which is in use, e.g. "9.2 pings/s × 2 swaths (first shown)". Single-swath systems ignore
@@ -27,6 +47,17 @@ Nothing yet.
   screenshot, acknowledgements, copyright and license.
 
 ### Changed
+- **A tidier toolbar**: Grid, Colors and Combine moved to a new **Display (only you)** group in Settings (they still
+  apply at once, and only to you), and the toolbar's Pause button is gone. The pie's time line and Live let you
+  look back without freezing the display; replays still have Pause in the Source bar.
+- **Slice depth, slice thickness and across-track width are no longer in Settings**: the slices are placed by
+  dragging. Settings > Tracking > Across-track width is now only the width of the column under the vessel that layers
+  and the thermocline are tracked in.
+- **Each page keeps the swath history itself** (about 60 kB per swath at 0.2 m cells in 25 m of water, so about
+  300 MB for the default 5000 swaths), and so does the plotter, to send pages that connect later. Lower Swath
+  history if that's too much.
+- **The Source bar's Real-time / Replay switch** is boxed, showing it chooses one of two modes, and the bar reads
+  "Source:".
 - The **Background swaths** setting is shown only when the sidelobe suppression that uses it ("Subtract each beam's
   mean of recent pings") is selected.
 - **The command is now `wcp`** (was `water_column_plotter_web`).

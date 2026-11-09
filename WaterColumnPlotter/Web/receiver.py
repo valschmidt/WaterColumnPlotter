@@ -5,6 +5,7 @@ own process and does nothing else, so it keeps up with the sonar.
 """
 
 import logging
+import queue
 import socket
 import struct
 import time
@@ -71,7 +72,17 @@ def run(bind_ip, port, multicast_group, out_queue, rcvbuf=8 * 2 ** 20):
         return
     km = kmall()
     pending = {}  # key -> [arrival time, parts list]
-    stats = {'packets': 0, 'datagrams': 0, 'discarded': 0}
+    # behind: complete datagrams dropped because the worker's queue was full (processing can't keep up).
+    stats = {'packets': 0, 'datagrams': 0, 'discarded': 0, 'behind': 0}
+
+    def forward(item):
+        # The queue is bounded, so a worker that falls behind doesn't fill memory with datagrams waiting to be
+        # processed: new ones are dropped (and counted) until it catches up.
+        try:
+            out_queue.put_nowait(item)
+        except queue.Full:
+            if not isinstance(item, tuple):
+                stats['behind'] += 1
     next_stats = time.monotonic() + STATS_INTERVAL_S
 
     while True:
@@ -82,14 +93,14 @@ def run(bind_ip, port, multicast_group, out_queue, rcvbuf=8 * 2 ** 20):
         now = time.monotonic()
 
         if data and data[4:8] in (b'#IIP', b'#SVP'):  # Installation parameters (transducer depth); sound speed profile.
-            out_queue.put(data)
+            forward(data)
         elif data and data[4:8] == b'#MWC':
             stats['packets'] += 1
             km.OpenBytestoRead(data)
             header = km.read_EMdgmHeader()
             partition = km.read_EMdgmMpartition()
             if partition['numOfDgms'] == 1:
-                out_queue.put(data)
+                forward(data)
                 stats['datagrams'] += 1
             else:
                 # Partitions of one datagram share the header's system, sounder and time fields.
@@ -101,7 +112,7 @@ def run(bind_ip, port, multicast_group, out_queue, rcvbuf=8 * 2 ** 20):
                     lead_size = HEADER_SIZE + PARTITION_SIZE
                     if header['dgmVersion'] >= 2:  # REV I+: cmnPart is repeated in every partition.
                         lead_size += km.read_EMdgmMbody()['numBytesCmnPart']
-                    out_queue.put(reassemble(entry[1], lead_size))
+                    forward(reassemble(entry[1], lead_size))
                     stats['datagrams'] += 1
 
         # Drop datagrams whose partitions did not all arrive.
@@ -110,5 +121,5 @@ def run(bind_ip, port, multicast_group, out_queue, rcvbuf=8 * 2 ** 20):
             stats['discarded'] += 1
 
         if now >= next_stats:
-            out_queue.put(('stats', dict(stats)))
+            forward(('stats', dict(stats)))
             next_stats = now + STATS_INTERVAL_S

@@ -10,9 +10,12 @@ recorded file, and shows them in three linked views:
 - **Pie**: the latest swath's fan of beams, as a cross-section below the transducer.
 - **Vertical slice**: a curtain beneath the vessel. Each column averages the water column across a narrow band
   either side of nadir, over a few swaths, so it builds up a profile of the water column along the track.
-- **Horizontal slice**: one depth band (a slice depth and thickness) across the whole swath, over time, which shows
+- **Horizontal slice**: one depth band across the whole swath, over time, which shows
   targets and layers to either side of the track. It can show amplitude, or the amplitude-weighted depth of the
   signal within the band, colored or shaded as a surface.
+
+Drag the slices' bands on the plots to move or resize them, and the slices are redrawn over their whole history at
+once. Drag the pie's time line on either slice to look back through the recent swaths; **Live** follows new data.
 
 It can also:
 
@@ -142,7 +145,7 @@ viewing shares the same settings and data source.
 | `--replay FILE` | | Replay this recorded file at start-up. |
 | `--data-dir DIR` | the current directory | Where browsing for recordings to replay starts. |
 
-`wcp --help` lists them too. The display's own settings (cell size, slice depth, sidelobe suppression, tracking and
+`wcp --help` lists them too. The plotter's own settings (cell size, sidelobe suppression, tracking and
 so on) are in the page's **Settings** panel.
 
 ## The original Qt version

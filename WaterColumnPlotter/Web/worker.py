@@ -1,16 +1,15 @@
 """
-Worker: parses complete #MWC datagrams with pykmall, grids them, and produces display data:
-- the pie: average of the last alongTrackAvg_swath swaths, cropped to its data;
-- slice columns: vertical (per depth row) and horizontal (per across-track column) averages, averaged along track
-  in blocks of alongTrackAvg_swath swaths.
+Worker: parses complete #MWC datagrams with pykmall and grids them. Each completed swath (its datagrams summed: one
+per receive head on dual-head systems) is sent to the pages as a compact grid (encode_swath), and pages build the pie
+and both slices from the swaths they hold, so they can move the slices and step through time without the worker.
+The worker also averages a vertical column under the vessel (Settings: across-track width) over each group of
+alongTrackAvg_swath swaths, for layer and thermocline tracking.
 Counts are of swaths, not ping cycles: a dual-swath system transmits two swaths per ping cycle, in different
-directions, under one pingCnt. A swath is identified by (pingCnt, swathAlongPosition); its #MWC datagrams (one per
-receive head on dual-head systems) are summed together.
+directions, under one pingCnt. A swath is identified by (pingCnt, swathAlongPosition), and numbered (seq) from 0 in
+the order completed; tracking columns cover the swaths numbered k * alongTrackAvg_swath to (k + 1) *
+alongTrackAvg_swath - 1, the same groups the pages average the slices over.
 Results are put on a queue once per update interval. A recorded file can be replayed in place of live data
 (see replay.py).
-
-Grids are blocks covering just the data (see gridding.py), so the pie and slice columns carry the index of their
-first row / column.
 """
 
 import collections
@@ -23,8 +22,7 @@ import time
 import numpy as np
 from KMALL.kmall import kmall
 
-from WaterColumnPlotter.Web.gridding import (GridTooLarge, PingBackground, add_blocks, average, grid_mwc,
-                                             horizontal_band, vertical_band)
+from WaterColumnPlotter.Web.gridding import GridTooLarge, PingBackground, add_blocks, average, grid_mwc, vertical_band
 from WaterColumnPlotter.Web.layers import LayerTracker
 from WaterColumnPlotter.Web.replay import Replay
 from WaterColumnPlotter.Web.thermocline import ThermoclineTracker, depth_error, svp_thermocline
@@ -40,6 +38,9 @@ CAST_RECENT_S = 600.0
 PING_RATE_PINGS = 21
 MAX_PING_GAP_S = 5.0
 CALIBRATION_PICKS = 10
+# A swath is complete when the next one starts; if no datagram has arrived for this long, it is taken as complete.
+SWATH_IDLE_S = 0.5
+NO_DATA = 255  # encoded cell with no data
 
 RESET_SETTINGS = ('binSize_m', 'alongTrackAvg_swath', 'referenceToSurface', 'transducerDepth_m', 'sidelobeSuppression',
                   'dualSwath')
@@ -48,30 +49,28 @@ RESET_SETTINGS = ('binSize_m', 'alongTrackAvg_swath', 'referenceToSurface', 'tra
 DUAL_SWATH = {'both': None, 'first': 0, 'second': 1}
 
 
-def band_weighted_depth(sums, counts, offset, band, bin_size):
+def encode_swath(meta, block):
     """
-    Per grid column, over the rows of band [r0, r1): the sum of each cell's linear amplitude (from its mean dB) times
-    its depth, and the sum of the amplitudes, as a 1D block ((col0,), sum, weight). Their ratio is the
-    amplitude-weighted mean depth of the signal in the band.
-    Only columns where the swath covers the whole band are included: those with data at or above the band's top row
-    and at or below its bottom row. Elsewhere the fan's edge or the seafloor cuts the band, and only part of it would
-    count, biasing the depth. Empty if the band isn't wholly inside the block.
+    A swath's grid for the pages: its mean level (dB) per cell, cropped to the cells with data, quantized to one byte
+    per cell as base + q * step dB (q = NO_DATA where there is none). The step is the swath's range over 254 levels:
+    0.5 dB for the 127 dB range of Kongsberg's samples, finer when the range is smaller.
+    Returns (meta with row0, col0, rows, cols, base, step added, bytes), or None if the swath has no data.
     """
-    (row0, col0), (r0, r1) = offset, band
-    a, b = r0 - row0, r1 - row0
-    empty = (col0,), np.zeros(0), np.zeros(0)
-    if a < 0 or b > sums.shape[0] or b <= a:
-        return empty
-    covered = (counts[:a + 1] > 0).any(axis=0) & (counts[b - 1:] > 0).any(axis=0)
-    cols = np.flatnonzero(covered)
-    if not len(cols):
-        return empty
-    c0, c1 = cols[0], cols[-1] + 1
-    n = np.where(covered[c0:c1], counts[a:b, c0:c1], 0)
+    (row0, col0), sums, counts = block
+    rows, cols = np.flatnonzero(counts.any(axis=1)), np.flatnonzero(counts.any(axis=0))
+    if not len(rows):
+        return None
+    r0, r1, c0, c1 = rows[0], rows[-1] + 1, cols[0], cols[-1] + 1
+    n = counts[r0:r1, c0:c1]
     with np.errstate(invalid='ignore', divide='ignore'):
-        amplitude = np.where(n > 0, 10.0 ** (sums[a:b, c0:c1] / np.maximum(n, 1) / 20.0), 0.0)
-    depth = (row0 + np.arange(a, b) + 0.5)[:, None] * bin_size
-    return (int(col0 + c0),), (amplitude * depth).sum(axis=0), amplitude.sum(axis=0)
+        mean = sums[r0:r1, c0:c1] / n
+    has = n > 0
+    lo, hi = float(mean[has].min()), float(mean[has].max())
+    step = max((hi - lo) / 254, 0.01)
+    q = np.full(mean.shape, NO_DATA, dtype=np.uint8)
+    q[has] = np.clip(np.round((mean[has] - lo) / step), 0, 254)
+    return ({**meta, 'row0': int(row0 + r0), 'col0': int(col0 + c0), 'rows': int(r1 - r0), 'cols': int(c1 - c0),
+             'base': round(lo, 4), 'step': round(step, 6)}, q.tobytes())
 
 
 def band_sum(sums, counts, offset, band, axis):
@@ -116,18 +115,17 @@ class Worker:
 
     def reset(self):
         s = self.settings
-        # Gridded blocks of the most recent swaths, for the pie: [(pingCnt, swathAlongPosition), block]. Datagrams of
-        # the same swath (one per receive head on dual-head systems) are summed into one entry.
-        self.recent = collections.deque(maxlen=s['alongTrackAvg_swath'])
-        # Slice column being accumulated: {'swaths': set of swath keys, 'v': block, 'h': block, 'times': []}
+        self.seq = 0             # number of the next swath completed
+        self.current = None      # swath being received: {'key': (pingCnt, swathAlongPosition), 'block', 'time', 'seafloor'}
+        self.last_datagram = time.monotonic()
+        self.new_swaths = []     # completed swaths since the last update: (meta, bytes) from encode_swath
+        # Tracking column being accumulated: {'seq0', 'v': block, 'times': [], 'seafloor': []}
         self.column = None
-        # Completed slice columns since the last update: (time, (v_off, v), (h_off, h), layers, thermocline, (hz_off, hz))
-        self.new_columns = []
+        self.new_tracks = []     # tracking results since the last update: {'seq0', 'seq1', 't', 'layers', 'thermo'}
         self.tracker = LayerTracker(min_level_db=s['layerMinLevel_dB'])
         self.thermocline = ThermoclineTracker(threshold_db_per_m=s['thermoclineThreshold_dBpm'],
                                               along_track_s=s['thermoclineWindow_s'])
         self.v_band = vertical_band(s)
-        self.h_band = horizontal_band(s)
         self.background = PingBackground(s['backgroundSwaths'])  # for 'ping_mean' sidelobe suppression
 
     def apply_settings(self, new):
@@ -138,27 +136,46 @@ class Worker:
             self.reset()
         else:
             self.v_band = vertical_band(new)
-            self.h_band = horizontal_band(new)
             self.tracker.min_level_db = new['layerMinLevel_dB']
             self.thermocline.threshold = new['thermoclineThreshold_dBpm']
             self.thermocline.along_track_s = new['thermoclineWindow_s']
             self.background.n = new['backgroundSwaths']
         return reset
 
+    def finish_swath(self):
+        """The swath being received is complete: encode it for the pages and add it to the tracking column."""
+        c, self.current = self.current, None
+        encoded = encode_swath({'seq': self.seq, 't': c['time'], 'ping': c['key'][0], 'pos': c['key'][1]}, c['block'])
+        if encoded is None:
+            return
+        self.new_swaths.append(encoded)
+        (row0, col0), sums, counts = c['block']
+        v = band_sum(sums, counts, (row0, col0), self.v_band, axis=1)  # per row, over the across-track band
+        found = [z for z in c['seafloor'] if z is not None]
+        seafloor = min(found) if found else None
+        if self.column is None:
+            self.column = {'seq0': self.seq, 'v': v, 'times': [c['time']], 'seafloor': [seafloor]}
+        else:
+            col = self.column
+            col['v'] = add_blocks(col['v'], v)
+            col['times'].append(c['time'])
+            col['seafloor'].append(seafloor)
+        A = self.settings['alongTrackAvg_swath']
+        if (self.seq + 1) % A == 0:  # the last swath of its group
+            self.finish_column()
+        self.seq += 1
+
     def finish_column(self):
-        c = self.column
+        c, self.column = self.column, None
         (v_off,), v = average(c['v'])
-        (h_off,), h = average(c['h'])
-        (hz_off,), hz = average(c['hz'])  # amplitude-weighted mean depth in the horizontal slice's band
         t = float(np.mean(c['times']))
         b = self.settings['binSize_m']
         depths = (v_off + np.arange(len(v))) * b
         found = [z for z in c['seafloor'] if z is not None]
         seafloor = min(found) if found else None
         layers = self.tracker.add_profile(t, depths, v, seafloor)
-        self.new_columns.append((t, (v_off, v), (h_off, h), layers,
-                                 self.track_thermocline(t, v_off, depths, v, seafloor), (hz_off, hz)))
-        self.column = None
+        self.new_tracks.append({'seq0': c['seq0'], 'seq1': self.seq, 't': t, 'layers': layers,
+                                'thermo': self.track_thermocline(t, v_off, depths, v, seafloor)})
 
     def set_svp(self, time, depth, speed):
         """A new cast: returns its thermocline (top, bottom) below the surface, or None if none was found."""
@@ -224,6 +241,7 @@ class Worker:
 
     def process(self, data):
         t0 = time.perf_counter()
+        self.last_datagram = time.monotonic()
         self.km.OpenBytestoRead(data)
         dg = self.km.read_EMdgmMWC()
         self.note_ping(dg)
@@ -243,57 +261,29 @@ class Worker:
             self.stats['no_bottom'] += 1
             return
         sums, counts, row0, col0, bottom = result
-        # The seafloor under the vertical slice: the shallowest bottom detection in its across-track band.
+        # The seafloor under the tracking column: the shallowest bottom detection in its across-track band.
         b = s['binSize_m']
         in_band = (bottom[0] >= self.v_band[0] * b) & (bottom[0] < self.v_band[1] * b)
         seafloor = float(bottom[1][in_band].min()) if in_band.any() else None
         block = ((row0, col0), sums, counts)
-        swath = (dg['cmnPart']['pingCnt'], dg['cmnPart']['swathAlongPosition'])
-
-        if self.recent and self.recent[-1][0] == swath:
-            self.recent[-1][1] = add_blocks(self.recent[-1][1], block)
-        else:
-            self.recent.append([swath, block])
-
-        # Each slice column averages alongTrackAvg_swath swaths (an odd number splits a dual-swath ping cycle).
-        if self.column is not None and swath not in self.column['swaths'] \
-                and len(self.column['swaths']) >= s['alongTrackAvg_swath']:
-            self.finish_column()
-        v = band_sum(sums, counts, (row0, col0), self.v_band, axis=1)  # per row, over the across-track band
-        h = band_sum(sums, counts, (row0, col0), self.h_band, axis=0)  # per column, over the depth band
-        hz = band_weighted_depth(sums, counts, (row0, col0), self.h_band, b)
-        if self.column is None:
-            self.column = {'swaths': {swath}, 'v': v, 'h': h, 'hz': hz, 'times': [dg['header']['dgtime']],
-                           'seafloor': [seafloor]}
-        else:
-            c = self.column
-            c['swaths'].add(swath)
-            c['v'] = add_blocks(c['v'], v)
-            c['h'] = add_blocks(c['h'], h)
-            c['hz'] = add_blocks(c['hz'], hz)
-            c['times'].append(dg['header']['dgtime'])
-            c['seafloor'].append(seafloor)
+        key = (cmn['pingCnt'], cmn['swathAlongPosition'])
+        if self.current is not None and self.current['key'] != key:
+            self.finish_swath()
+        if self.current is None:
+            self.current = {'key': key, 'block': block, 'time': dg['header']['dgtime'], 'seafloor': [seafloor]}
+        else:  # another receive head's datagram of the same swath
+            self.current['block'] = add_blocks(self.current['block'], block)
+            self.current['seafloor'].append(seafloor)
 
         self.stats['processed'] += 1
         self.stats['process_ms'] = 0.9 * self.stats['process_ms'] + 0.1 * 1e3 * (time.perf_counter() - t0)
 
-    def pie(self):
-        """Average of the recent swaths, cropped to cells with data: (data, row0, col0) or None."""
-        if not self.recent:
-            return None
-        (row0, col0), sums, counts = functools.reduce(add_blocks, (r[1] for r in self.recent))
-        rows = np.flatnonzero(counts.any(axis=1))
-        cols = np.flatnonzero(counts.any(axis=0))
-        if not len(rows):
-            return None
-        r0, r1, c0, c1 = rows[0], rows[-1] + 1, cols[0], cols[-1] + 1
-        _, data = average(((0, 0), sums[r0:r1, c0:c1], counts[r0:r1, c0:c1]))
-        return data, int(row0 + r0), int(col0 + c0)
-
     def take_update(self, receiver_stats):
-        columns, self.new_columns = self.new_columns, []
-        return {'type': 'update', 'pie': self.pie(), 'columns': columns,
-                'stats': {**receiver_stats, **self.stats}}
+        if self.current is not None and time.monotonic() - self.last_datagram > SWATH_IDLE_S:
+            self.finish_swath()  # no more data coming (paused, or the end of a file)
+        swaths, self.new_swaths = self.new_swaths, []
+        tracks, self.new_tracks = self.new_tracks, []
+        return {'type': 'update', 'swaths': swaths, 'tracks': tracks, 'stats': {**receiver_stats, **self.stats}}
 
 
 def handle_datagram(worker, item, out_queue):

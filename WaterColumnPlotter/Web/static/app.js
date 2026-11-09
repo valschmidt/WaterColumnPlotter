@@ -49,12 +49,13 @@ const SLICE_V_COLOR = 'rgba(80, 220, 255, 0.9)';   // vertical slice band (acros
 // ---------------------------------------------------------------------------
 const state = {
   settings: null,
-  hBand: null,         // the horizontal slice's band when last seen, to notice changes
   hMode: 'amplitude',  // horizontal slice: 'amplitude', or the amplitude-weighted 'depth' in its band ('shaded': hillshaded)
-  grid: null,          // slice bands as grid indices: {vertical: [c0, c1] columns, horizontal: [r0, r1] rows}
-  pie: null,           // {data, rows, cols, row0, col0}
-  columns: [],         // [{t, vOff, v, hOff, h, layers: [[id, top, bottom]]}], oldest first; offsets are grid indices
-  paused: false,
+  // Where the slices are, this viewer's own (dragged on the plots): the horizontal slice's depth band [top, bottom]
+  // and the vertical slice's across-track band [port, starboard], in metres (starboard positive).
+  slices: null,        // set below, from storage
+  pieSeq: null,        // number of the newest swath the pie shows; null: live, the newest received
+  combine: 'mean',     // how data columns or rows sharing a screen pixel are combined: 'mean', 'max' or 'decimate'
+  tracks: [],          // tracking results [{seq0, seq1, t, layers: [[id, top, bottom]], thermo}], oldest first
   autoLevels: true,
   showGrid: true,
   tracking: 'thermocline',  // tracked features drawn on the vertical slice: 'off', 'layers' or 'thermocline'
@@ -64,6 +65,20 @@ const state = {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+const SLICES_KEY = 'wcp.slices';
+const DEFAULT_SLICES = { depth: [9, 11], across: [-5, 5] };
+function loadSlices() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SLICES_KEY));
+    if (s && s.depth?.length === 2 && s.across?.length === 2 && [...s.depth, ...s.across].every(Number.isFinite)) return s;
+  } catch (e) { /* no storage: defaults */ }
+  return structuredClone(DEFAULT_SLICES);
+}
+function saveSlices() {
+  try { localStorage.setItem(SLICES_KEY, JSON.stringify(state.slices)); } catch (e) { /* not kept */ }
+}
+state.slices = loadSlices();
+
 function percentiles(data, lo, hi) {
   // Percentiles of the finite values, from a sample of at most ~50k values.
   const step = Math.max(1, Math.floor(data.length / 50000));
@@ -134,6 +149,47 @@ function utc(t) {
 const HIST = { w: 50, gap: 4, barW: 12 };
 const SIDE_W = 90;  // side strip width (px)  // histogram level editor: bars, gap, color bar (px)
 
+// Combine an image's columns kx at a time and rows ky at a time: by the mean or max of the values present (NaN where
+// none), or by decimation, keeping only the value nearest the middle of each group (as the browser does when it draws
+// an image smaller than it is; at the image's edges a group may lack its middle). Groups are counted from the image's grid indices (ci0, ri0: of its first column and row), so they stay put
+// as the image grows or scrolls. Returns an image with the same fields; the image itself if nothing is combined.
+function combineImage(im, kx, ky, how) {
+  if (kx === 1 && ky === 1) return im;
+  const mod = (a, n) => ((a % n) + n) % n;
+  const offx = mod(im.ci0 ?? 0, kx), offy = mod(im.ri0 ?? 0, ky);
+  const W = Math.ceil((im.w + offx) / kx), H = Math.ceil((im.h + offy) / ky);
+  const cw = (im.x1 - im.x0) / im.w, ch = (im.y1 - im.y0) / im.h;
+  const col = Int32Array.from({ length: im.w }, (_, c) => Math.floor((c + offx) / kx));
+  const acc = new Float32Array(W * H).fill(how === 'max' ? -Infinity : 0), n = new Uint32Array(W * H);
+  const shade = im.shade ? new Float32Array(W * H) : null;
+  const decimate = how === 'decimate', midx = (kx - 1) / 2, midy = (ky - 1) / 2;
+  const best = decimate ? new Float32Array(W * H).fill(Infinity) : null;  // distance from the middle of the value kept
+  for (let r = 0; r < im.h; r++) {
+    const row = Math.floor((r + offy) / ky) * W, dy = Math.abs((r + offy) % ky - midy);
+    for (let c = 0, i = r * im.w; c < im.w; c++, i++) {
+      const v = im.data[i];
+      if (Number.isNaN(v)) continue;
+      const k = row + col[c];
+      if (decimate) {
+        const d = dy + Math.abs((c + offx) % kx - midx);
+        if (d < best[k]) { best[k] = d; acc[k] = v; if (shade) shade[k] = im.shade[i]; }
+        n[k] = 1;
+        continue;
+      }
+      if (how === 'max') { if (v > acc[k]) acc[k] = v; } else acc[k] += v;
+      n[k]++;
+      if (shade) shade[k] += im.shade[i];
+    }
+  }
+  const data = new Float32Array(W * H);
+  for (let k = 0; k < data.length; k++) {
+    data[k] = n[k] ? (how === 'mean' ? acc[k] / n[k] : acc[k]) : NaN;
+    if (shade && n[k] && !decimate) shade[k] /= n[k];
+  }
+  const x0 = im.x0 - offx * cw, y0 = im.y0 - offy * ch;
+  return { w: W, h: H, data, shade, x0, x1: x0 + W * kx * cw, y0, y1: y0 + H * ky * ch };
+}
+
 // ---------------------------------------------------------------------------
 // Panel: one plot. World coordinates have y increasing downward on screen.
 // ---------------------------------------------------------------------------
@@ -145,7 +201,9 @@ class Panel {
     this.readout = this.el.querySelector('.readout');
     this.loInput = this.el.querySelector('.lo');
     this.hiInput = this.el.querySelector('.hi');
-    Object.assign(this, opts);  // xLabel, yLabel, pinTop, pinRight (used by fit), equalAspect, describe, overlay
+    // xLabel, yLabel, pinTop (used by fit), equalAspect, describe, overlay, and handles: a function returning the
+    // indicators that can be dragged on the plot (see hitHandle).
+    Object.assign(this, opts);
     this.sideW = this.side ? SIDE_W + 12 : 0;  // optional strip right of the plot (the SVP on the vertical slice)
     this.margin = { l: 58, r: 12 + this.sideW + HIST.w + HIST.gap + HIST.barW + 8, t: 8, b: 34 };
     this.hist = null;       // histogram of the image values, for the level editor
@@ -153,6 +211,10 @@ class Panel {
     this.histDrag = null;   // {which: 'lo' | 'hi' | 'both', range, start, levels} while dragging a level
     this.image = null;      // {w, h, data, x0, x1, y0, y1, extent: {x0, x1, y0, y1}}
     this.bitmap = document.createElement('canvas');
+    // The image as colored and drawn: combined to fit the screen (combineImage), {kx, ky, how, x0, x1, y0, y1}.
+    this.shown = null;
+    this.decimationEl = Object.assign(document.createElement('span'), { className: 'decimation', hidden: true });
+    this.el.append(this.decimationEl);
     this.levels = null;     // [lo, hi] in the plot's unit
     this.unitLabel = this.el.querySelector('.unit-label');
     this.setUnit('dB');
@@ -273,8 +335,23 @@ class Panel {
     if (redraw && this.image) { this.colorize(); this.draw(); }
   }
 
+  // Image columns and rows per screen (device) pixel at the current zoom, rounded: how many to combine (1: none).
+  combineFactors() {
+    const im = this.image, v = this.view, p = this.plot, dpr = window.devicePixelRatio || 1;
+    if (!im || !v) return [1, 1];
+    const cx = im.w / (im.x1 - im.x0) * (v.x1 - v.x0) / (p.w * dpr);
+    const cy = im.h / (im.y1 - im.y0) * (v.y1 - v.y0) / (p.h * dpr);
+    return [Math.max(1, Math.round(cx)), Math.max(1, Math.round(cy))];
+  }
+
+  // Color the image into the bitmap drawn, combined to fit the screen at the current zoom.
   colorize() {
-    const { w, h, data, shade } = this.image;
+    const [kx, ky] = this.combineFactors();
+    // Depths: the maximum isn't meaningful, so they are averaged instead.
+    const how = this.unit !== 'dB' && state.combine === 'max' ? 'mean' : state.combine;
+    const im = combineImage(this.image, kx, ky, how);
+    this.shown = { kx, ky, how, x0: im.x0, x1: im.x1, y0: im.y0, y1: im.y1 };
+    const { w, h, data, shade } = im;
     const [lo, hi] = this.levels;
     const scale = 255 / (hi - lo);
     this.bitmap.width = w;
@@ -300,7 +377,6 @@ class Panel {
     const e = this.image.extent;
     let v = { x0: e.x0, x1: e.x1, y0: e.y0, y1: e.y1 };
     if (this.pinTop) v.y0 = topDepth();
-    if (this.pinRight) v.x1 = 0;
     if (v.x1 <= v.x0) v.x1 = v.x0 + 1;
     if (v.y1 <= v.y0) v.y1 = v.y0 + 1;
     if (this.equalAspect) {
@@ -331,16 +407,38 @@ class Panel {
       this.draw();
     }, { passive: false });
 
-    let drag = null;
+    let drag = null, handleDrag = null;
     c.addEventListener('pointerdown', ev => {
       if (!this.view) return;
       c.setPointerCapture(ev.pointerId);
       if (this.inHist(ev.offsetX, ev.offsetY)) { this.startLevelDrag(ev.offsetY); return; }
+      const hit = this.hitHandle(ev.offsetX, ev.offsetY);
+      if (hit) {
+        const [wx, wy] = this.toWorld(ev.offsetX, ev.offsetY), h = hit.handle;
+        handleDrag = { ...hit, start: h.axis === 'x' ? wx : wy, lo: h.lo, hi: h.hi, at: h.at };
+        return;
+      }
       drag = { x: ev.offsetX, y: ev.offsetY, view: { ...this.view } };
     });
     c.addEventListener('pointermove', ev => {
       if (this.histDrag) { this.moveLevelDrag(ev.offsetY); return; }
-      c.style.cursor = this.inHist(ev.offsetX, ev.offsetY) ? 'ns-resize' : 'crosshair';
+      if (handleDrag) {
+        const [wx, wy] = this.toWorld(ev.offsetX, ev.offsetY), d = handleDrag, h = d.handle;
+        const delta = (h.axis === 'x' ? wx : wy) - d.start;
+        if (h.kind === 'line') h.set(d.at + delta);
+        else if (d.part === 'move') h.set(d.lo + delta, d.hi + delta);
+        else {
+          // An edge changes the width about the band's centre, which stays put.
+          const centre = (d.lo + d.hi) / 2;
+          const half = Math.max(0, d.part === 'lo' ? centre - (d.lo + delta) : d.hi + delta - centre);
+          h.set(centre - half, centre + half);
+        }
+        this.updateReadout(ev.offsetX, ev.offsetY);
+        return;
+      }
+      const hover = !drag && this.hitHandle(ev.offsetX, ev.offsetY);
+      c.style.cursor = this.inHist(ev.offsetX, ev.offsetY) ? 'ns-resize'
+        : hover ? (hover.handle.axis === 'x' ? 'ew-resize' : 'ns-resize') : 'crosshair';
       if (drag) {
         const p = this.plot, v = drag.view;
         const dx = (ev.offsetX - drag.x) / p.w * (v.x1 - v.x0);
@@ -352,7 +450,9 @@ class Panel {
       this.updateReadout(ev.offsetX, ev.offsetY);
     });
     c.addEventListener('pointerup', () => {
+      if (handleDrag && handleDrag.handle.done) handleDrag.handle.done();
       drag = null;
+      handleDrag = null;
       if (this.histDrag) { this.histDrag = null; this.draw(); }
     });
     c.addEventListener('pointerleave', () => { this.readout.textContent = ''; });
@@ -366,6 +466,35 @@ class Panel {
         this.setAutoZoom(true);
       }
     });
+  }
+
+  // ----- Draggable indicators -----
+
+  // The indicator under a screen point, if any: {handle, part: 'lo' | 'hi' | 'move'}. Handles are
+  // {axis: 'x' | 'y', kind: 'band', lo, hi, set(lo, hi)} (a band between two world coordinates, dragged by either
+  // edge to widen or narrow it about its centre, or by its centre line to move it) or {axis, kind: 'line', at, set(at)}; done() is called after a drag.
+  hitHandle(sx, sy) {
+    if (!this.handles || !this.view) return null;
+    const p = this.plot;
+    if (sx < p.x || sx > p.x + p.w || sy < p.y || sy > p.y + p.h) return null;
+    for (const h of this.handles()) {
+      const pos = v => (h.axis === 'x' ? this.toScreen(v, 0)[0] : this.toScreen(0, v)[1]);
+      const s = h.axis === 'x' ? sx : sy;
+      if (h.kind === 'line') {
+        if (Math.abs(s - pos(h.at)) <= 6) return { handle: h, part: 'move' };
+        continue;
+      }
+      const a = pos(h.lo), b = pos(h.hi), mid = (a + b) / 2, width = Math.abs(b - a);
+      const edge = Math.abs(s - a) <= Math.abs(s - b) ? 'lo' : 'hi', toEdge = Math.min(Math.abs(s - a), Math.abs(s - b));
+      if (width >= 16) {  // wide enough to grab an edge, or the centre line between them
+        if (toEdge <= 5) return { handle: h, part: edge };
+        if (Math.abs(s - mid) <= 5) return { handle: h, part: 'move' };
+      } else {  // narrow: inside moves it, just outside an edge resizes it
+        if (Math.abs(s - mid) <= Math.max(3, width / 2)) return { handle: h, part: 'move' };
+        if (toEdge <= 6) return { handle: h, part: edge };
+      }
+    }
+    return null;
   }
 
   // ----- Histogram and color-level editor, to the right of the plot -----
@@ -501,6 +630,8 @@ class Panel {
       return;
     }
     if (sx < p.x || sx > p.x + p.w || sy < p.y || sy > p.y + p.h) { this.readout.textContent = ''; return; }
+    const hit = this.hitHandle(sx, sy);
+    if (hit && hit.handle.label) { this.readout.textContent = hit.handle.label(hit.part); return; }
     const [x, y] = this.toWorld(sx, sy);
     const v = this.valueAt(x, y);
     this.readout.textContent = this.describe(x, y) + (Number.isFinite(v) ? `   ${v.toFixed(this.unit === 'm' ? 2 : 1)} ${this.unit}` : '');
@@ -523,7 +654,10 @@ class Panel {
     ctx.rect(p.x, p.y, p.w, p.h);
     ctx.clip();
     if (this.image) {
-      const im = this.image;
+      // Zooming can change how many columns or rows share a pixel: recombine from the full image.
+      const [kx, ky] = this.combineFactors(), sh = this.shown;
+      if (this.levels && (!sh || sh.kx !== kx || sh.ky !== ky)) this.colorize();
+      const im = this.shown || this.image;
       const [sx0, sy0] = this.toScreen(im.x0, im.y0);
       const [sx1, sy1] = this.toScreen(im.x1, im.y1);
       ctx.imageSmoothingEnabled = false;
@@ -536,6 +670,21 @@ class Panel {
     if (this.side) this.side(ctx, this);
     this.drawHistogram();
     if (source.opening) this.drawNotice(`Opening ${source.opening}…`);
+    this.showDecimation();
+  }
+
+  // 1:N in yellow at the plot's bottom right while N columns (or rows) of data share each screen pixel.
+  showDecimation() {
+    const sh = this.image && this.view && this.shown, el = this.decimationEl;
+    if (!sh || (sh.kx === 1 && sh.ky === 1)) { el.hidden = true; return; }
+    el.textContent = sh.kx > 1 && sh.ky > 1 ? `1:${sh.kx} × 1:${sh.ky}` : `1:${Math.max(sh.kx, sh.ky)}`;
+    const what = [sh.kx > 1 && `${sh.kx} columns`, sh.ky > 1 && `${sh.ky} rows`].filter(Boolean).join(' and ');
+    const how = { mean: 'averaged', max: 'the strongest shown', decimate: 'one shown, the rest skipped' }[sh.how];
+    el.title = `1 px = ${what} at this zoom level\n(${how}: Settings > Display > Combine)`;
+    const p = this.plot;
+    el.style.left = `${this.canvas.offsetLeft + p.x + p.w - 3}px`;
+    el.style.top = `${this.canvas.offsetTop + p.y + p.h - 3}px`;
+    el.hidden = false;
   }
 
   // A message over the plot, on a dark label so it reads over data.
@@ -612,7 +761,7 @@ class Panel {
   }
 }
 
-// Draw a band between two world coordinates along one axis.
+// Draw a band between two world coordinates along one axis, with its centre line (dragged to move it).
 function band(ctx, panel, axis, a, b, color) {
   const v = panel.view;
   const [x0, y0] = panel.toScreen(axis === 'x' ? a : v.x0, axis === 'y' ? a : v.y0);
@@ -627,28 +776,84 @@ function band(ctx, panel, axis, a, b, color) {
   else { ctx.moveTo(x0, y0); ctx.lineTo(x0, y1); ctx.moveTo(x1, y0); ctx.lineTo(x1, y1); }
   ctx.stroke();
   ctx.setLineDash([]);
+  ctx.strokeStyle = color.replace('0.9)', '0.5)');
+  ctx.beginPath();
+  if (axis === 'y') { const m = (y0 + y1) / 2; ctx.moveTo(x0, m); ctx.lineTo(x1, m); }
+  else { const m = (x0 + x1) / 2; ctx.moveTo(m, y0); ctx.lineTo(m, y1); }
+  ctx.stroke();
 }
 
-// World extents of the slice bands, from the grid indices the worker uses.
-// Grid row r covers depth [r, r + 1) * cell size; column c covers across-track [c, c + 1) * cell size.
-function depthBand() {
-  const b = state.settings.binSize_m, [r0, r1] = state.grid.horizontal;
-  return [r0 * b, r1 * b];
+// The slice bands as grid indices: rows [r0, r1) of the horizontal slice's depth band, columns [c0, c1) of the
+// vertical slice's across-track band. Grid row r covers depth [r, r + 1) * cell size; column c across-track
+// [c, c + 1) * cell size. A band covers every cell it touches, and at least one.
+function gridBand([lo, hi]) {
+  const b = state.settings.binSize_m, i0 = Math.floor(lo / b + 1e-6);
+  return [i0, Math.max(i0 + 1, Math.ceil(hi / b - 1e-6))];
 }
-function acrossBand() {
-  const b = state.settings.binSize_m, [c0, c1] = state.grid.vertical;
-  return [c0 * b, c1 * b];
+function depthRows() { return gridBand(state.slices.depth); }
+function acrossCols() { return gridBand(state.slices.across); }
+// Their world extents: the cells averaged.
+function depthBand() { const b = state.settings.binSize_m, [r0, r1] = depthRows(); return [r0 * b, r1 * b]; }
+function acrossBand() { const b = state.settings.binSize_m, [c0, c1] = acrossCols(); return [c0 * b, c1 * b]; }
+
+// Move or resize a slice band (dragged on a plot): which is 'depth' or 'across'.
+function setSlice(which, lo, hi) {
+  const b = state.settings.binSize_m;
+  if (hi < lo) [lo, hi] = [hi, lo];
+  // On cell edges: the cells averaged are what the band shows. The width is rounded to whole cells and placed about
+  // the centre, so resizing doesn't shift it (by more than half a cell, to land on cell edges).
+  const width = Math.max(1, Math.round((hi - lo) / b)) * b, centre = (lo + hi) / 2;
+  lo = Math.round((centre - width / 2) / b) * b;
+  hi = lo + width;
+  if (which === 'depth' && lo < topDepth()) { hi += topDepth() - lo; lo = topDepth(); }
+  state.slices[which] = [lo, hi];
+  scheduleRebuild(which === 'depth' ? { h: true } : { v: true });
 }
 
-function historyColumns() {
-  const s = state.settings;
-  return s ? Math.ceil(s.historySwaths / s.alongTrackAvg_swath) : 1000;
+// The pie's time on the slices: the swaths it averages, ending at its swath (x is swaths from the newest).
+function pieSpan() {
+  const last = buffer.newestSeq(), shown = state.pieShown;
+  if (last === null || !shown) return null;
+  return [shown.seq0 - last - 1, shown.seq1 - last];
+}
+function pieTimeHandle() {
+  const span = pieSpan();
+  if (!span) return [];
+  return [{
+    axis: 'x', kind: 'line', at: span[1], set: x => setPieSeq(buffer.newestSeq() + Math.round(x)),
+    label: () => `Pie: ${utc(state.pieShown.t)} UTC (drag to step through time; to the right end to follow live data)`,
+  }];
+}
+function drawPieTime(ctx, panel) {
+  const span = pieSpan();
+  if (!span) return;
+  const p = panel.plot, [x0] = panel.toScreen(span[0], 0), [x1] = panel.toScreen(span[1], 0);
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.10)';
+  ctx.fillRect(x0, p.y, x1 - x0, p.h);
+  ctx.strokeStyle = state.pieSeq === null ? 'rgba(255, 255, 255, 0.55)' : 'rgba(255, 255, 255, 0.9)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(x1, p.y); ctx.lineTo(x1, p.y + p.h); ctx.stroke();
+  ctx.lineWidth = 1;
 }
 
-function columnAt(x) {
-  // Column under world x (swaths, newest = 0) on the slice panels; each column spans alongTrackAvg_swath swaths.
-  const k = state.columns.length + Math.floor(x / state.settings.alongTrackAvg_swath);
-  return state.columns[k];
+const sliceHandle = (axis, which) => ({
+  axis, kind: 'band', lo: state.slices[which][0], hi: state.slices[which][1],
+  set: (lo, hi) => setSlice(which, lo, hi), done: saveSlices,
+  label: part => {
+    const [a, b] = which === 'depth' ? depthBand() : acrossBand(), how = part === 'move' ? 'drag to move' : 'drag to resize';
+    return which === 'depth' ? `Horizontal slice: ${a.toFixed(1)} to ${b.toFixed(1)} m deep (${how})`
+      : `Vertical slice: ${a.toFixed(1)} to ${b.toFixed(1)} m across (${how})`;
+  },
+});
+
+// The swath under x (swaths from the newest) on the slices, if held.
+function swathAt(x) {
+  const last = buffer.newestSeq();
+  return last === null ? null : buffer.get(last + Math.ceil(x));
+}
+function describeSwath(x) {
+  const sw = swathAt(x);
+  return `${Math.max(0, Math.round(-x))} swaths ago${sw ? ' (' + utc(sw.t) + ' UTC)' : ''}`;
 }
 
 const panels = {
@@ -659,41 +864,42 @@ const panels = {
     equalAspect: true,
     describe: (x, y) => `across ${x.toFixed(1)} m, depth ${y.toFixed(1)} m`,
     overlay: (ctx, panel) => {
-      if (!state.grid) return;
+      if (!state.settings) return;
       band(ctx, panel, 'y', ...depthBand(), SLICE_H_COLOR);
       band(ctx, panel, 'x', ...acrossBand(), SLICE_V_COLOR);
     },
+    handles: () => state.settings ? [sliceHandle('y', 'depth'), sliceHandle('x', 'across')] : [],
   }),
   horizontal: new Panel('horizontal', {
     xLabel: 'Swaths (0 = newest)',
     yLabel: 'Across-track (m)   port ↑',
-    pinRight: true,
     // Depths in the slice's band can only lie within it.
     valueRange: () => {
-      if (state.hMode === 'amplitude' || !state.grid) return null;
+      if (state.hMode === 'amplitude' || !state.settings) return null;
       const [lo, hi] = depthBand();
       return { lo, hi };
     },
-    describe: (x, y) => {
-      const c = columnAt(x);
-      return `${Math.round(-x)} swaths ago${c ? ' (' + utc(c.t) + ' UTC)' : ''}, across ${y.toFixed(1)} m`;
+    describe: (x, y) => `${describeSwath(x)}, across ${y.toFixed(1)} m`,
+    overlay: (ctx, panel) => {
+      if (!state.settings) return;
+      band(ctx, panel, 'y', ...acrossBand(), SLICE_V_COLOR);
+      drawPieTime(ctx, panel);
     },
-    overlay: (ctx, panel) => { if (state.grid) band(ctx, panel, 'y', ...acrossBand(), SLICE_V_COLOR); },
+    handles: () => state.settings ? [...pieTimeHandle(), sliceHandle('y', 'across')] : [],
   }),
   vertical: new Panel('vertical', {
     xLabel: 'Swaths (0 = newest)',
     yLabel: 'Depth below transducer (m)',
     pinTop: true,
-    pinRight: true,
-    describe: (x, y) => {
-      const c = columnAt(x);
-      return `${Math.round(-x)} swaths ago${c ? ' (' + utc(c.t) + ' UTC)' : ''}, depth ${y.toFixed(1)} m`;
-    },
+    describe: (x, y) => `${describeSwath(x)}, depth ${y.toFixed(1)} m`,
     overlay: (ctx, panel) => {
-      if (state.grid) band(ctx, panel, 'y', ...depthBand(), SLICE_H_COLOR);
+      if (!state.settings) return;
+      band(ctx, panel, 'y', ...depthBand(), SLICE_H_COLOR);
       if (state.tracking === 'layers') drawLayers(ctx, panel);
       if (state.tracking === 'thermocline') drawThermocline(ctx, panel);
+      drawPieTime(ctx, panel);
     },
+    handles: () => state.settings ? [...pieTimeHandle(), sliceHandle('y', 'depth')] : [],
     side: drawSVP,
   }),
 };
@@ -704,15 +910,19 @@ const panels = {
 const LAYER_COLORS = ['#ff9f1c', '#2ec4b6', '#e71d36', '#ffffff', '#a463f2', '#9bf6ff'];
 const LAYER_MIN_COLUMNS = 10;  // only draw layers seen in at least this many columns
 
+// x extent (swaths from the newest) of a tracking column.
+function trackX(c, last) { return [c.seq0 - last - 1, c.seq1 - last]; }
+
 // Outline each tracked layer: its top and bottom in every column it was found in.
 function drawLayers(ctx, panel) {
-  const cols = state.columns, N = cols.length, A = state.settings.alongTrackAvg_swath;
+  const last = buffer.newestSeq();
+  if (last === null) return;
   const count = new Map();
-  for (const c of cols) for (const [id] of c.layers) count.set(id, (count.get(id) || 0) + 1);
+  for (const c of state.tracks) for (const [id] of c.layers) count.set(id, (count.get(id) || 0) + 1);
   ctx.lineWidth = 1.5;
-  for (let k = 0; k < N; k++) {
-    const [x0] = panel.toScreen((k - N) * A, 0), [x1] = panel.toScreen((k - N + 1) * A, 0);
-    for (const [id, top, bottom] of cols[k].layers) {
+  for (const c of state.tracks) {
+    const [a, b] = trackX(c, last), [x0] = panel.toScreen(a, 0), [x1] = panel.toScreen(b, 0);
+    for (const [id, top, bottom] of c.layers) {
       if (count.get(id) < LAYER_MIN_COLUMNS) continue;
       ctx.strokeStyle = LAYER_COLORS[id % LAYER_COLORS.length];
       const [, y0] = panel.toScreen(0, top), [, y1] = panel.toScreen(0, bottom);
@@ -738,13 +948,13 @@ function alertColor(err) {
 
 // The latest column with a thermocline pick, or undefined.
 function lastPick() {
-  for (let k = state.columns.length - 1; k >= 0; k--) if (state.columns[k].thermo) return state.columns[k].thermo;
+  for (let k = state.tracks.length - 1; k >= 0; k--) if (state.tracks[k].thermo) return state.tracks[k].thermo;
 }
 
 // The tracked thermocline bottom, one segment per column colored by the cast alert, and the depth the picks are
 // compared with (dashed): the picks just after the cast, or the cast's thermocline bottom.
 function drawThermocline(ctx, panel) {
-  const cols = state.columns, N = cols.length, A = state.settings.alongTrackAvg_swath, p = panel.plot;
+  const p = panel.plot, newest = buffer.newestSeq();
   const last = lastPick();
   const ref = last && last[1] !== null ? last[1]
     : state.svp && state.svp.thermocline_m ? state.svp.thermocline_m[1] + svpShift() : null;
@@ -759,10 +969,10 @@ function drawThermocline(ctx, panel) {
   // A dark outline first, so the line stands out on any color map.
   for (const [width, color] of [[5, 'rgba(0, 0, 0, 0.8)'], [2.5, null]]) {
     ctx.lineWidth = width;
-    for (let k = 0; k < N; k++) {
-      const t = cols[k].thermo;
+    for (const c of newest === null ? [] : state.tracks) {
+      const t = c.thermo;
       if (!t) continue;
-      const [x0, y] = panel.toScreen((k - N) * A, t[0]), [x1] = panel.toScreen((k - N + 1) * A, 0);
+      const [a, b] = trackX(c, newest), [x0, y] = panel.toScreen(a, t[0]), [x1] = panel.toScreen(b, 0);
       ctx.strokeStyle = color || alertColor(t[2]);
       ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(Math.max(x1, x0 + 1), y); ctx.stroke();
     }
@@ -881,8 +1091,139 @@ function drawSVP(ctx, panel) {
 }
 
 // ---------------------------------------------------------------------------
-// Building panel images from received data
+// The swath buffer: every swath received (up to the swath history), from which the pie and both slices are built,
+// so the slices can be moved and the pie stepped through time without asking the plotter for anything.
+// Each swath is the plotter's grid cropped to its data, one byte per cell: base + q * step dB, NO_DATA where empty.
 // ---------------------------------------------------------------------------
+const NO_DATA = 255;
+const buffer = {
+  swaths: [],  // oldest first: {seq, t, ping, pos, row0, col0, rows, cols, base, step, q}, plus cached band sums
+  bytes: 0,
+  newestSeq() { return this.swaths.length ? this.swaths[this.swaths.length - 1].seq : null; },
+  oldestSeq() { return this.swaths.length ? this.swaths[0].seq : null; },
+  // Index of the last swath numbered seq or less, or -1.
+  indexAtOrBefore(seq) {
+    let lo = 0, hi = this.swaths.length - 1, found = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.swaths[mid].seq <= seq) { found = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    return found;
+  },
+  get(seq) {
+    const sw = this.swaths[this.indexAtOrBefore(seq)];
+    return sw && sw.seq === seq ? sw : null;
+  },
+  add(sw) {
+    this.swaths.push(sw);
+    this.bytes += sw.q.length;
+  },
+  // Keep the newest swaths within both the swath history and its memory budget (the plotter keeps the same);
+  // tracking results go with the swaths they cover.
+  trim() {
+    const s = state.settings, max = s ? s.historySwaths : Infinity, budget = s ? s.historyMemory_MB * 1e6 : Infinity;
+    let drop = Math.max(0, this.swaths.length - max), bytes = this.bytes;
+    for (let i = 0; i < drop; i++) bytes -= this.swaths[i].q.length;
+    while (drop < this.swaths.length && bytes > budget) bytes -= this.swaths[drop++].q.length;
+    if (drop) { this.swaths.splice(0, drop); this.bytes = bytes; }
+    // Whether the memory budget, not the swath count, is what limits the history.
+    this.memoryLimited = !!s && this.swaths.length < max && this.swaths.length > 0 &&
+      this.bytes + this.bytes / this.swaths.length > budget;
+    const oldest = this.oldestSeq();
+    if (oldest === null) state.tracks = [];
+    else if (state.tracks.length && state.tracks[0].seq1 < oldest) state.tracks = state.tracks.filter(c => c.seq1 >= oldest);
+  },
+  clear() { this.swaths = []; this.bytes = 0; },
+};
+
+// Per swath, cached while the band is the same: the vertical slice's sums over its columns [c0, c1), per row.
+function swathVertical(sw, c0, c1) {
+  const key = `${c0}:${c1}`;
+  if (sw.v && sw.v.key === key) return sw.v;
+  const sum = new Float32Array(sw.rows), n = new Uint16Array(sw.rows);
+  const a = Math.max(c0, sw.col0) - sw.col0, b = Math.min(c1, sw.col0 + sw.cols) - sw.col0, q = sw.q, W = sw.cols;
+  for (let r = 0; b > a && r < sw.rows; r++) {
+    let acc = 0, k = 0;
+    for (let i = r * W + a, end = r * W + b; i < end; i++) { const v = q[i]; if (v !== NO_DATA) { acc += v; k++; } }
+    sum[r] = k * sw.base + sw.step * acc;
+    n[r] = k;
+  }
+  return (sw.v = { key, sum, n });
+}
+
+// First and last row with data in each column of a swath (-1 where none).
+function columnRows(sw) {
+  if (sw.colRows) return sw.colRows;
+  const first = new Int16Array(sw.cols).fill(-1), last = new Int16Array(sw.cols).fill(-1), q = sw.q, W = sw.cols;
+  for (let r = 0; r < sw.rows; r++) {
+    for (let c = 0; c < W; c++) {
+      if (q[r * W + c] === NO_DATA) continue;
+      if (first[c] < 0) first[c] = r;
+      last[c] = r;
+    }
+  }
+  return (sw.colRows = { first, last });
+}
+
+// Per swath, cached while the band is the same: the horizontal slice's sums over its rows [r0, r1), per column, and
+// for the depth mode, the sums of linear amplitude times depth and of amplitude, in the columns where the swath
+// covers the whole band (data at or above its top row and at or below its bottom row; elsewhere the fan's edge or
+// the seafloor cuts the band and would bias the depth).
+function swathHorizontal(sw, r0, r1, bin, depthMode) {
+  const key = `${r0}:${r1}:${bin}:${depthMode}`;
+  if (sw.h && sw.h.key === key) return sw.h;
+  const C = sw.cols, sum = new Float32Array(C), n = new Uint16Array(C), zw = new Float32Array(C), w = new Float32Array(C);
+  const a = Math.max(r0, sw.row0) - sw.row0, b = Math.min(r1, sw.row0 + sw.rows) - sw.row0, q = sw.q;
+  const whole = depthMode && r0 >= sw.row0 && r1 <= sw.row0 + sw.rows;
+  let rows = null, amp = null;
+  if (whole) {
+    rows = columnRows(sw);
+    amp = sw.amp || (sw.amp = Float32Array.from({ length: 255 }, (_, k) => 10 ** ((sw.base + sw.step * k) / 20)));
+  }
+  for (let r = a; r < b; r++) {
+    const z = (sw.row0 + r + 0.5) * bin;
+    for (let c = 0, i = r * C; c < C; c++, i++) {
+      const v = q[i];
+      if (v === NO_DATA) continue;
+      sum[c] += v;
+      n[c]++;
+      if (whole && rows.first[c] <= a && rows.last[c] >= b - 1) { const A = amp[v]; zw[c] += A * z; w[c] += A; }
+    }
+  }
+  for (let c = 0; c < C; c++) sum[c] = n[c] * sw.base + sw.step * sum[c];
+  return (sw.h = { key, sum, n, zw, w });
+}
+
+// A slice image from the buffer: which 'v' (rows: depth) or 'h' (rows: across-track). Its columns are the groups of
+// along-track-average swaths (numbered k * A to (k + 1) * A - 1, the same groups the plotter tracks in), oldest at
+// left. x is in swaths from the newest: swath n spans [n - newest - 1, n - newest].
+function buildSlice(which) {
+  const sw = buffer.swaths, s = state.settings;
+  if (!sw.length) return null;
+  const A = s.alongTrackAvg_swath, bin = s.binSize_m, depth = which === 'h' && state.hMode !== 'amplitude';
+  const [i0, i1] = which === 'v' ? acrossCols() : depthRows();
+  let lo = Infinity, hi = -Infinity;
+  for (const w of sw) {
+    const o = which === 'v' ? w.row0 : w.col0;
+    lo = Math.min(lo, o);
+    hi = Math.max(hi, o + (which === 'v' ? w.rows : w.cols));
+  }
+  const g0 = Math.floor(sw[0].seq / A), g1 = Math.floor(sw[sw.length - 1].seq / A), W = g1 - g0 + 1, H = hi - lo;
+  const num = new Float32Array(W * H), den = new Float32Array(W * H);
+  for (const w of sw) {
+    const c = which === 'v' ? swathVertical(w, i0, i1) : swathHorizontal(w, i0, i1, bin, depth);
+    const top = depth ? c.zw : c.sum, bottom = depth ? c.w : c.n;
+    const g = Math.floor(w.seq / A) - g0, off = (which === 'v' ? w.row0 : w.col0) - lo;
+    for (let i = 0; i < top.length; i++) {
+      if (bottom[i] > 0) { const k = (off + i) * W + g; num[k] += top[i]; den[k] += bottom[i]; }
+    }
+  }
+  const data = new Float32Array(W * H);
+  for (let k = 0; k < data.length; k++) data[k] = den[k] > 0 ? num[k] / den[k] : NaN;
+  const last = sw[sw.length - 1].seq;
+  return { data, W, H, lo, g0, x0: g0 * A - last - 1, x1: (g1 + 1) * A - last - 1 };
+}
+
 function dataExtentRows(data, w, h) {
   // First and last rows containing any finite value, or null.
   let first = -1, last = -1;
@@ -895,13 +1236,94 @@ function dataExtentRows(data, w, h) {
   return first < 0 ? null : [first, last];
 }
 
+let shownDepthRows = null;  // the horizontal slice's band when its depth colors were last set
+function updateSlices(which = ['v', 'h']) {
+  const s = state.settings;
+  if (s && state.hMode !== 'amplitude') {
+    // Depths lie within the band, so a new band needs a new color scale.
+    const key = depthRows().join(':');
+    if (key !== shownDepthRows) { shownDepthRows = key; panels.horizontal.resetLevels(); }
+  }
+  for (const [panel, kind] of [[panels.vertical, 'v'], [panels.horizontal, 'h']]) {
+    if (!which.includes(kind)) continue;
+    const im = s && buildSlice(kind);
+    if (!im) { panel.setImage(null); continue; }
+    const b = s.binSize_m, ext = dataExtentRows(im.data, im.W, im.H) || [0, im.H - 1];
+    panel.setImage({
+      w: im.W, h: im.H, data: im.data, x0: im.x0, x1: im.x1, y0: im.lo * b, y1: (im.lo + im.H) * b, ci0: im.g0, ri0: im.lo,
+      // Auto-zoom shows the whole swath history, filling from the right.
+      extent: { x0: Math.min(im.x0, -s.historySwaths), x1: im.x1, y0: (im.lo + ext[0]) * b, y1: (im.lo + ext[1] + 1) * b },
+      shade: panel === panels.horizontal && state.hMode === 'shaded' ? hillshade(im.data, im.W, im.H, b) : null,
+    });
+  }
+}
+
+// The pie: the mean of along-track-average swaths, ending at the chosen one (or the newest).
 function updatePie() {
-  const p = state.pie, s = state.settings;
-  if (!p || !s) { panels.pie.setImage(null); return; }
-  const b = s.binSize_m;
-  const x0 = p.col0 * b, y0 = p.row0 * b;
-  const x1 = x0 + p.cols * b, y1 = y0 + p.rows * b;
-  panels.pie.setImage({ w: p.cols, h: p.rows, data: p.data, x0, x1, y0, y1, extent: { x0, x1, y0, y1 } });
+  const sw = buffer.swaths, s = state.settings;
+  if (!sw.length || !s) { state.pieShown = null; panels.pie.setImage(null); showPieTime(); return; }
+  const A = s.alongTrackAvg_swath;
+  const want = state.pieSeq === null ? buffer.newestSeq() : Math.max(buffer.oldestSeq(), state.pieSeq);
+  const i1 = Math.max(0, buffer.indexAtOrBefore(want)), seq1 = sw[i1].seq;
+  let i0 = i1;
+  while (i0 > 0 && sw[i0 - 1].seq > seq1 - A) i0--;
+  const group = sw.slice(i0, i1 + 1);
+  let r0 = Infinity, r1 = -Infinity, c0 = Infinity, c1 = -Infinity;
+  for (const w of group) {
+    r0 = Math.min(r0, w.row0); r1 = Math.max(r1, w.row0 + w.rows);
+    c0 = Math.min(c0, w.col0); c1 = Math.max(c1, w.col0 + w.cols);
+  }
+  const W = c1 - c0, H = r1 - r0, num = new Float32Array(W * H), den = new Uint16Array(W * H);
+  for (const w of group) {
+    const q = w.q;
+    for (let r = 0; r < w.rows; r++) {
+      const k0 = (w.row0 - r0 + r) * W + (w.col0 - c0), i0r = r * w.cols;
+      for (let c = 0; c < w.cols; c++) {
+        const v = q[i0r + c];
+        if (v !== NO_DATA) { num[k0 + c] += w.base + w.step * v; den[k0 + c]++; }
+      }
+    }
+  }
+  const data = new Float32Array(W * H);
+  for (let k = 0; k < data.length; k++) data[k] = den[k] ? num[k] / den[k] : NaN;
+  state.pieShown = { seq0: group[0].seq, seq1, t: group[group.length - 1].t };
+  const b = s.binSize_m, x0 = c0 * b, y0 = r0 * b, x1 = c1 * b, y1 = r1 * b;
+  panels.pie.setImage({ w: W, h: H, data, x0, x1, y0, y1, ci0: c0, ri0: r0, extent: { x0, x1, y0, y1 } });
+  showPieTime();
+}
+
+// Show the newest swaths in the pie (null), or the ones ending at swath seq: dragging to the newest end goes live.
+function setPieSeq(seq) {
+  const newest = buffer.newestSeq();
+  state.pieSeq = newest === null || seq >= newest ? null : Math.max(buffer.oldestSeq(), seq);
+  scheduleRebuild({ pie: true });
+}
+const liveButton = panels.pie.el.querySelector('.live'), pieTimeEl = panels.pie.el.querySelector('.pie-time');
+liveButton.addEventListener('click', () => setPieSeq(Infinity));
+function showPieTime() {
+  const live = state.pieSeq === null, shown = state.pieShown;
+  liveButton.setAttribute('aria-pressed', String(live));
+  if (!shown) { pieTimeEl.textContent = ''; return; }
+  const ago = buffer.newestSeq() - shown.seq1;
+  pieTimeEl.textContent = `${utc(shown.t)} UTC` + (live ? '' : ` · ${ago} swath${ago === 1 ? '' : 's'} ago`);
+}
+
+// Rebuild the plots from the buffer at the next frame: parts {v, h, pie} (the vertical and horizontal slices), all if
+// not given.
+let rebuild = null;
+function scheduleRebuild(parts = { v: true, h: true, pie: true }) {
+  if (!rebuild) {
+    rebuild = {};
+    requestAnimationFrame(() => {
+      const r = rebuild;
+      rebuild = null;
+      const slices = ['v', 'h'].filter(k => r[k]);
+      if (slices.length) updateSlices(slices);
+      if (r.pie) updatePie();
+      for (const p of Object.values(panels)) p.draw();  // indicators drawn on the others
+    });
+  }
+  Object.assign(rebuild, parts);
 }
 
 // Hillshading of a depth image (w x h, row-major, NaN where empty) as a factor per cell: the surface is lit from the
@@ -927,54 +1349,17 @@ function hillshade(z, w, h, size) {
   return out;
 }
 
-// Build a slice image: rows are grid indices covering every column's data, columns are slice columns (oldest at left).
-// Returns null if no column has data.
-function sliceImage(cols, offKey, valKey) {
-  let lo = Infinity, hi = -Infinity;
-  for (const c of cols) {
-    if (!c[valKey].length) continue;
-    lo = Math.min(lo, c[offKey]);
-    hi = Math.max(hi, c[offKey] + c[valKey].length);
-  }
-  if (hi <= lo) return null;
-  const N = cols.length, rows = hi - lo;
-  const data = new Float32Array(rows * N).fill(NaN);
-  for (let k = 0; k < N; k++) {
-    const vals = cols[k][valKey], start = cols[k][offKey] - lo;
-    for (let i = 0; i < vals.length; i++) data[(start + i) * N + k] = vals[i];
-  }
-  return { data, row0: lo, rows };
-}
-
-function updateSlices() {
-  const s = state.settings, cols = state.columns, N = cols.length;
-  if (!s || !N) { panels.vertical.setImage(null); panels.horizontal.setImage(null); return; }
-  const b = s.binSize_m;
-  const x0 = -N * s.alongTrackAvg_swath;  // x is in swaths, newest = 0
-  const span = -historyColumns() * s.alongTrackAvg_swath;  // auto-zoom shows the full history, filling from the right
-
-  const depth = state.hMode !== 'amplitude';
-  for (const [panel, offKey, valKey] of [[panels.vertical, 'vOff', 'v'],
-                                         [panels.horizontal, depth ? 'hzOff' : 'hOff', depth ? 'hz' : 'h']]) {
-    const im = sliceImage(cols, offKey, valKey);
-    if (!im) { panel.setImage(null); continue; }
-    const ext = dataExtentRows(im.data, N, im.rows) || [0, im.rows - 1];
-    panel.setImage({
-      w: N, h: im.rows, data: im.data, x0, x1: 0, y0: im.row0 * b, y1: (im.row0 + im.rows) * b,
-      extent: { x0: span, x1: 0, y0: (im.row0 + ext[0]) * b, y1: (im.row0 + ext[1] + 1) * b },
-      shade: panel === panels.horizontal && state.hMode === 'shaded' ? hillshade(im.data, N, im.rows, b) : null,
-    });
-  }
-}
-
 function redrawAll() {
   updatePie();
   updateSlices();
 }
 
 function resetData() {
-  state.pie = null;
-  state.columns = [];
+  buffer.clear();
+  state.tracks = [];
+  state.pieSeq = null;
+  state.pieShown = null;
+  showPieTime();
   for (const p of Object.values(panels)) {
     p.levels = null;
     p.histRangeFixed = null;
@@ -1000,14 +1385,6 @@ hModeSelect.addEventListener('change', () => {
   updateSlices();
 });
 
-const pauseButton = document.getElementById('pause');
-pauseButton.addEventListener('click', () => {
-  state.paused = !state.paused;
-  pauseButton.textContent = state.paused ? 'Resume' : 'Pause';
-  pauseButton.setAttribute('aria-pressed', String(state.paused));
-  if (!state.paused) redrawAll();
-});
-
 document.getElementById('grid').addEventListener('change', ev => {
   state.showGrid = ev.target.checked;
   for (const p of Object.values(panels)) p.draw();
@@ -1015,6 +1392,14 @@ document.getElementById('grid').addEventListener('change', ev => {
 document.getElementById('tracking').addEventListener('change', ev => {
   state.tracking = ev.target.value;
   panels.vertical.draw();
+});
+const combineSelect = document.getElementById('combine');
+try { if (['mean', 'max', 'decimate'].includes(localStorage.getItem('wcp.combine'))) state.combine = localStorage.getItem('wcp.combine'); } catch (e) { /* default */ }
+combineSelect.value = state.combine;
+combineSelect.addEventListener('change', () => {
+  state.combine = combineSelect.value;
+  try { localStorage.setItem('wcp.combine', state.combine); } catch (e) { /* not kept */ }
+  for (const p of Object.values(panels)) if (p.image && p.levels) { p.colorize(); p.draw(); }
 });
 document.getElementById('colormap').addEventListener('change', ev => {
   LUT = LUTS[ev.target.value];
@@ -1038,7 +1423,7 @@ settingsToggle.addEventListener('click', () => {
 });
 
 function showSettings() {
-  for (const input of settingsForm.querySelectorAll('input, select')) {
+  for (const input of settingsForm.querySelectorAll('input[name], select[name]')) {
     if (document.activeElement === input) continue;
     if (input.type === 'checkbox') input.checked = state.settings[input.name];
     else input.value = state.settings[input.name];
@@ -1071,7 +1456,7 @@ settingsForm.elements.referenceToSurface.addEventListener('change', ev => {
 settingsForm.addEventListener('submit', ev => {
   ev.preventDefault();
   const requested = {};
-  for (const input of settingsForm.querySelectorAll('input, select')) {
+  for (const input of settingsForm.querySelectorAll('input[name], select[name]')) {
     if (input.type === 'checkbox') requested[input.name] = input.checked;
     else if (input.tagName === 'SELECT') requested[input.name] = input.value;
     else if (input.value !== '') requested[input.name] = Number(input.value);
@@ -1335,8 +1720,10 @@ function showStats(stats) {
   if (lastStats && lastStats.replaying === replaying && count >= lastStats.count) {
     rate = `${((count - lastStats.count) / ((now - lastStats.at) / 1000)).toFixed(1)} datagrams/s · `;
   }
-  // Swaths skipped since the last update because the cell size is too small for the swath.
+  // Swaths skipped since the last update because the cell size is too small for the swath, and datagrams dropped
+  // because processing couldn't keep up with them.
   const tooLarge = lastStats ? (stats.grid_too_large ?? 0) - lastStats.tooLarge : 0;
+  const behind = lastStats ? (stats.behind ?? 0) - lastStats.behind : 0;
   if (!replaying) {
     // Whether real-time data is arriving, next to the source.
     const perSec = lastStats && !lastStats.replaying && count >= lastStats.count
@@ -1352,12 +1739,14 @@ function showStats(stats) {
     const swaths = stats.swaths_per_ping > 1 ? ` × ${stats.swaths_per_ping} swaths${only}` : '';
     rate = `${stats.ping_rate_hz.toFixed(1)} pings/s${swaths} · ` + rate;
   }
-  lastStats = { at: now, count, replaying, tooLarge: stats.grid_too_large ?? 0 };
-  statusEl.classList.toggle('error', tooLarge > 0);
+  lastStats = { at: now, count, replaying, tooLarge: stats.grid_too_large ?? 0, behind: stats.behind ?? 0 };
+  statusEl.classList.toggle('error', tooLarge > 0 || behind > 0);
   statusEl.textContent = (tooLarge > 0 ? 'Cell size too small for this swath: swaths are being skipped · ' : '') +
+    (behind > 0 ? `Processing can't keep up: ${behind} datagrams dropped · ` : '') +
     rate + (replaying ? `replaying · processed ${count}`
       : `received ${count} · incomplete dropped ${stats.discarded ?? 0}`) +
-    ` · processing ${(stats.process_ms ?? 0).toFixed(0)} ms/datagram` + (state.paused ? ' · paused' : '');
+    ` · processing ${(stats.process_ms ?? 0).toFixed(0)} ms/datagram` +
+    ` · holding ${buffer.swaths.length} swaths (${(buffer.bytes / 1e6).toFixed(0)} MB${buffer.memoryLimited ? ', memory limit' : ''})`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1369,46 +1758,29 @@ function send(msg) {
 }
 
 function handleBinary(buf) {
+  // uint32 header length, JSON header, then each swath's rows x cols bytes in turn.
   const headerLen = new DataView(buf).getUint32(0, true);
   const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, headerLen)));
-  const payload = new Float32Array(buf, 4 + headerLen);
-  if (header.type === 'pie') {
-    state.pie = { ...header, data: payload };
-    if (!state.paused) updatePie();
-  } else if (header.type === 'columns') {
-    // Payload: every column's vertical values, then every column's horizontal values.
-    // Then every column's amplitude-weighted depths in the horizontal slice's band.
-    const { count, times, v, h, hz } = header;
-    const vals = [];
-    let pos = 0;
-    for (const [, len] of [...v, ...h, ...hz]) { vals.push(payload.subarray(pos, pos + len)); pos += len; }
-    for (let k = 0; k < count; k++) {
-      state.columns.push({ t: times[k], vOff: v[k][0], v: vals[k], hOff: h[k][0], h: vals[count + k],
-                           hzOff: hz[k][0], hz: vals[2 * count + k],
-                           layers: header.layers[k], thermo: header.thermocline[k] });
-    }
-    const max = historyColumns();
-    if (state.columns.length > max) state.columns.splice(0, state.columns.length - max);
-    if (!state.paused) updateSlices();
+  if (header.type !== 'swaths') return;
+  let pos = 4 + headerLen;
+  for (const meta of header.swaths) {
+    const size = meta.rows * meta.cols;
+    buffer.add({ ...meta, q: new Uint8Array(buf, pos, size) });
+    pos += size;
   }
+  buffer.trim();
+  scheduleRebuild();
 }
 
 function handleText(msg) {
   if (msg.type === 'settings') {
     state.settings = msg.settings;
-    state.grid = msg.grid;
-    // The horizontal slice's depths span its band: a new band (slice depth or thickness) needs a new color scale.
-    const band = state.grid && JSON.stringify(state.grid.horizontal);
-    if (band !== state.hBand) {
-      state.hBand = band;
-      if (state.hMode !== 'amplitude') { panels.horizontal.resetLevels(); updateSlices(); }
-    }
     showSettings();
     panels.pie.yLabel = panels.vertical.yLabel = depthLabel();
     // The top depth may have changed (heave allowance, depth reference).
     for (const p of [panels.pie, panels.vertical]) if (p.view && p.autoZoom) p.fit();
-    if (state.columns.length > historyColumns()) state.columns.splice(0, state.columns.length - historyColumns());
-    for (const p of Object.values(panels)) p.draw();
+    buffer.trim();  // the swath history may be shorter
+    scheduleRebuild();
   } else if (msg.type === 'reset') {
     resetData();
     if (msg.svp) { state.svp = null; panels.vertical.draw(); }
@@ -1420,6 +1792,10 @@ function handleText(msg) {
       source = msg;
       showSource();
     }
+  } else if (msg.type === 'tracks') {
+    state.tracks.push(...msg.tracks);
+    buffer.trim();
+    panels.vertical.draw();
   } else if (msg.type === 'svp') {
     state.svp = msg;
     panels.vertical.draw();
@@ -1436,9 +1812,9 @@ function connect() {
     if (typeof ev.data === 'string') handleText(JSON.parse(ev.data));
     else handleBinary(ev.data);
   };
-  ws.onclose = () => {
+  ws.onclose = ev => {
     statusEl.classList.add('error');
-    statusEl.textContent = 'Disconnected from plotter, retrying…';
+    statusEl.textContent = `Disconnected from plotter${ev.reason ? ` (${ev.reason})` : ''}, retrying…`;
     resetData();
     setTimeout(connect, 2000);
   };

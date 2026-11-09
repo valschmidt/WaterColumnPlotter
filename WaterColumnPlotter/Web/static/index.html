@@ -13,19 +13,11 @@
       <img src="/static/ccom-jhc-logo.png" alt="Center for Coastal and Ocean Mapping / Joint Hydrographic Center, University of New Hampshire" width="32" height="32">
       <span class="app-title">Water Column Plotter</span>
     </span>
-    <button id="pause" type="button">Pause</button>
-    <label class="check" title="Faint grid lines at the axis ticks."><input type="checkbox" id="grid" checked> Grid</label>
     <label title="Experimental features tracked in the vertical slice. Layers (after Roland Arsenault's watercolumn_layer_tracker): every scattering layer standing out from the background, any number, outlined top and bottom with a color per layer. Thermocline (after Jose Cordero Ros's MS thesis): one line, the bottom of the scattering layer that marks the bottom of the thermocline, green or red by the outer-beam depth error from using the last cast.">Tracking
       <select id="tracking">
         <option value="off">Off</option>
         <option value="layers">Layers</option>
         <option value="thermocline" selected>Thermocline</option>
-      </select></label>
-    <label title="Color map for all plots.">Colors
-      <select id="colormap">
-        <option value="viridis">Viridis</option>
-        <option value="jet">Jet</option>
-        <option value="grayscale">Grayscale</option>
       </select></label>
     <label class="check" title="Keep each plot's color scale at the 10th to 90th percentile of its data. Adjusting a scale by hand turns this off."><input type="checkbox" id="autolevels" checked> Auto levels</label>
     <button id="settings-toggle" type="button" aria-expanded="false" aria-controls="settings">Settings</button>
@@ -72,8 +64,8 @@
   </dialog>
 
   <div id="source-bar" class="bar" data-mode="realtime" title="Where the data comes from. Shared: changing it changes the display for everyone viewing this plotter, and clears it.">
-    <span class="source-label">Source</span>
-    <span class="segmented" role="group" aria-label="Data source">
+    <span class="source-label">Source:</span>
+    <span class="segmented" role="group" aria-label="Data source: real-time or replay" title="Choose one: where the data comes from.">
       <button type="button" data-mode="realtime" aria-pressed="true" title="Plot datagrams from the sonar (or SIS / K-Controller) as they arrive over UDP.">Real-time</button>
       <button type="button" data-mode="replay" aria-pressed="false" title="Plot a recorded .kmall / .kmwcd file, chosen in an Open dialog. Real-time data is ignored while replaying.">Replay</button>
     </span>
@@ -115,7 +107,7 @@
   </form>
 
 
-  <form id="settings" class="bar" hidden title="Processing settings are shared: changing them changes the display for everyone viewing this plotter.">
+  <form id="settings" class="bar" hidden title="Processing settings are shared: changing them changes the display for everyone viewing this plotter. Display settings are yours only.">
     <div class="groups">
       <fieldset>
         <legend title="Each sample is placed in a grid of square cells, the same size across-track and in depth. The grid grows to cover the data.">Pie grid</legend>
@@ -141,13 +133,8 @@
         <span class="unit" id="transducer-depth"></span>
       </fieldset>
       <fieldset>
-        <legend title="A plan view over time of one depth layer (magenta band on the pie)."><span class="swatch h"></span>Horizontal slice</legend>
-        <label title="Centre depth of the layer averaged into each column.">Slice depth <span class="unit">m</span><input name="sliceDepth_m" type="number" step="any" min="0"></label>
-        <label title="Thickness of the layer: the slice averages slice depth ± thickness / 2.">Slice thickness <span class="unit">m</span><input name="sliceThickness_m" type="number" step="any" min="0.01"></label>
-      </fieldset>
-      <fieldset>
-        <legend title="A depth profile over time (cyan band on the pie)."><span class="swatch v"></span>Vertical slice</legend>
-        <label title="Width of the band, centred under the vessel, averaged into each column.">Across-track width <span class="unit">m</span><input name="acrossTrackAvg_m" type="number" step="any" min="0.01"></label>
+        <legend title="Experimental layer and thermocline tracking run on the plotter, on a column under the vessel averaged over each group of along-track-average swaths. It doesn't follow the vertical slice: drawn on the vertical slice wherever that is.">Tracking</legend>
+        <label title="Width of the band, centred under the vessel, averaged into the column that layers and the thermocline are tracked in.">Across-track width <span class="unit">m</span><input name="acrossTrackAvg_m" type="number" step="any" min="0.01"></label>
         <label title="Experimental layer tracking: minimum level above the profile's background for a layer. Applies to new data.">Layer threshold <span class="unit">dB</span><input name="layerMinLevel_dB" type="number" step="any" min="0.1"></label>
       </fieldset>
       <fieldset>
@@ -160,11 +147,28 @@
       </fieldset>
       <fieldset>
         <legend>All plots</legend>
-        <label title="The pie shows the average of this many recent swaths, and each slice column averages this many swaths. Dual-swath systems transmit two swaths per ping cycle, so 2 swaths is one ping cycle; an odd number is allowed.">Along-track average <span class="unit">swaths</span><input name="alongTrackAvg_swath" type="number" step="1" min="1"></label>
+        <label title="The pie shows the average of this many swaths, ending at the one chosen (or the newest), and each slice column averages this many swaths. Dual-swath systems transmit two swaths per ping cycle, so 2 swaths is one ping cycle; an odd number is allowed.">Along-track average <span class="unit">swaths</span><input name="alongTrackAvg_swath" type="number" step="1" min="1"></label>
         <label title="When depth is measured from the transducer, the pie and vertical slice start this far above 0 m, so data raised above the transducer by heave stays visible.">Heave allowance <span class="unit">m</span><input name="heaveAllowance_m" type="number" step="any" min="0"></label>
-        <label title="Number of swaths shown in the slices.">Swath history<input name="historySwaths" type="number" step="1" min="10"></label>
+        <label title="Number of swaths each page keeps, and the slices show. Each swath takes about one byte per grid cell it covers in every page and in the plotter (about 60 kB at 0.2 m cells in 25 m of water), shown in the status line.">Swath history<input name="historySwaths" type="number" step="1" min="10"></label>
+        <label title="The most memory the swath history may take, in the plotter and in each page viewing it. When the swaths would take more (small cells, or deep water), the oldest are dropped, and the status line says 'memory limit'.">History memory <span class="unit">MB</span><input name="historyMemory_MB" type="number" step="1" min="50"></label>
       </fieldset>
-      <button type="submit" title="Applies to everyone viewing this plotter. Changing the cell size, depth reference or along-track average clears the slice history.">Apply</button>
+      <fieldset class="display">
+        <legend title="How the plots look on this screen. These apply at once, and only to you: not to anyone else viewing this plotter.">Display (only you)</legend>
+        <label class="check" title="Faint grid lines at the axis ticks.">Grid <input type="checkbox" id="grid" checked></label>
+        <label title="Color map for all plots.">Colors
+          <select id="colormap">
+            <option value="viridis">Viridis</option>
+            <option value="jet">Jet</option>
+            <option value="grayscale">Grayscale</option>
+          </select></label>
+        <label title="When a plot has more columns (or rows) of data than screen pixels at the current zoom, they are combined, and the plot shows 1:N in yellow at its bottom right. Mean averages them; Max keeps the strongest, so a target seen in a single column isn't averaged away; Decimate shows one and skips the rest, as plots did before (fast, but noisier, and what's skipped is never seen). Depths are averaged when Max is chosen.">Combine
+          <select id="combine">
+            <option value="mean">Mean</option>
+            <option value="max">Max</option>
+            <option value="decimate">Decimate</option>
+          </select></label>
+      </fieldset>
+      <button type="submit" title="Applies to everyone viewing this plotter. Changing the cell size, depth reference, along-track average, swaths or sidelobe suppression clears the history.">Apply</button>
     </div>
   </form>
 
@@ -172,6 +176,8 @@
     <section class="panel" id="pie">
       <div class="panel-head">
         <h2>Pie</h2>
+        <button class="live" type="button" aria-pressed="true" title="Show the newest swaths as they arrive. Dragging the pie's time line (white, in either slice) to an earlier time shows those swaths instead; click here, or drag the line back to the newest end, to follow the data again.">Live</button>
+        <span class="pie-time"></span>
         <button class="autozoom" type="button" aria-pressed="true" title="Fit this plot to the data as it arrives. Zooming (wheel) or panning (drag) turns it off; click here or double-click the plot to turn it back on.">Auto-zoom</button>
         <span class="readout"></span>
         <span class="levels">

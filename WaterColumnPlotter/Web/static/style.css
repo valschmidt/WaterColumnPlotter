@@ -121,6 +121,7 @@ input[type="number"] {
 #vertical { grid-area: vertical; }
 
 .panel {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -140,7 +141,8 @@ input[type="number"] {
   overflow: hidden;
 }
 .panel-head h2 { font-size: 13px; margin: 0; }
-.panel-head .autozoom { padding: 1px 8px; font-size: 12px; }
+.panel-head .autozoom, .panel-head .live { padding: 1px 8px; font-size: 12px; }
+.pie-time { color: var(--text); font-size: 12px; font-variant-numeric: tabular-nums; }
 .panel-head .hmode { padding: 1px 4px; font-size: 12px; }
 .readout { flex: 1; color: var(--muted); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; }
 .levels { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
@@ -214,10 +216,17 @@ select {
 @keyframes badge-pulse { from { opacity: 1; } to { opacity: 0.2; } }
 @media (prefers-reduced-motion: reduce) { .mode-badge.busy::before { animation: none; } }
 .source-label { font-weight: 600; }
-.segmented { display: inline-flex; }
-.segmented button { border-radius: 0; }
-.segmented button:first-child { border-radius: 4px 0 0 4px; }
-.segmented button:last-child { border-radius: 0 4px 4px 0; border-left: none; }
+/* A two-way switch: the two choices in one box, the chosen one filled. */
+.segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--bar-border);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.25);
+}
+.segmented button { border: none; border-radius: 4px; background: transparent; color: var(--muted); }
+.segmented button:hover { color: var(--text); }
 .segmented button[data-mode="realtime"][aria-pressed="true"] { background: var(--realtime); color: #0b1220; }
 .segmented button[data-mode="replay"][aria-pressed="true"] { background: var(--replay); color: #0b1220; }
 .mode-controls { display: contents; }
@@ -343,3 +352,17 @@ button:disabled:hover { border-color: var(--border); }
 .browser-list .size { color: var(--muted); font-variant-numeric: tabular-nums; }
 .browser-list .empty { padding: 8px 10px; color: var(--muted); }
 .browser-buttons { display: flex; justify-content: flex-end; margin-top: 10px; }
+
+/* Shown on a plot when more data columns (or rows) than screen pixels are combined: 1:N, at its bottom right. */
+.decimation {
+  position: absolute;
+  transform: translate(-100%, -100%);
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(17, 19, 23, 0.7);
+  color: #ffd84d;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
