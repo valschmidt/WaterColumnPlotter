@@ -81,25 +81,54 @@ Open a new terminal window, and `wcp` starts the plotter.
 
 ### Windows
 
-Install Python 3.10 or later from [python.org](https://www.python.org/downloads/) (check "Add python.exe to PATH" in
-the installer) and [Git for Windows](https://git-scm.com/download/win). Then, in PowerShell:
+You don't need Python or git for this. Open PowerShell (press the Start key, type `PowerShell`, press Enter) and run:
+
+```powershell
+irm https://raw.githubusercontent.com/valschmidt/WaterColumnPlotter/master/install.ps1 | iex
+```
+
+This runs [install.ps1](install.ps1), which installs [uv](https://docs.astral.sh/uv/) (a Python package manager) if
+you don't have it, and uses it to install Water Column Plotter with its own copy of Python. Everything is installed for
+your user account only, so you don't need administrator rights. It also adds **Water Column Plotter** to the Start menu.
+
+Start the plotter from the Start menu, or by typing `wcp` in a **new** PowerShell window. It runs in a console
+window; close that window (or press Ctrl-C in it) to stop it.
+
+The first time the plotter listens for sonar data, Windows may ask whether to allow it through the firewall. Allow it
+on the network the sonar is on (usually **Private** or **Domain**), or the plotter won't receive real-time data.
+Replaying recordings works either way.
+
+**Updating:** run the same `irm ... | iex` command again.
+
+**Uninstalling:** in PowerShell, run
+
+```powershell
+uv tool uninstall watercolumnplotter
+Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Water Column Plotter.lnk"
+```
+
+**For developers:** to work on the code, install [Git for Windows](https://git-scm.com/download/win) and
+[uv](https://docs.astral.sh/uv/) (`winget install --id Git.Git -e` and `winget install --id astral-sh.uv -e`), then:
 
 ```powershell
 git clone https://github.com/valschmidt/WaterColumnPlotter.git $HOME\WaterColumnPlotter
 cd $HOME\WaterColumnPlotter
-py -m venv .venv
-.venv\Scripts\python -m pip install --upgrade pip
-.venv\Scripts\python -m pip install -e .
+uv venv --python 3.12
+uv pip install -e .
 ```
 
-Start the plotter with `$HOME\WaterColumnPlotter\.venv\Scripts\wcp`.
+and start it with `uv run wcp` from that folder. Or run `uv tool install -e $HOME\WaterColumnPlotter`, then
+`uv tool update-shell`, so `wcp` runs your working copy from any directory. To try changes to the installer, run
+`powershell -ExecutionPolicy Bypass -File .\install.ps1 -Source .` from that folder.
 
 ### Updating
+
+On Linux and macOS (on Windows, see above):
 
 ```bash
 cd ~/WaterColumnPlotter
 git pull
-.venv/bin/python -m pip install -e .     # Windows: .venv\Scripts\python -m pip install -e .
+.venv/bin/python -m pip install -e .
 ```
 
 The last step is needed only when the packages Water Column Plotter uses change, but it's quick and harmless when
