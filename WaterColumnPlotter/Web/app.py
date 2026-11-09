@@ -2,8 +2,8 @@
 Browser-based Water Column Plotter: starts the UDP receiver and worker processes, serves the web page, and relays
 display data to connected browsers over a WebSocket.
 
-Usage: water_column_plotter_web [--udp-port 6020] [--multicast 225.255.255.255] [--http-port 8000] [--no-browser]
-                               [--data-dir DIR] [--replay FILE]
+Usage: wcp [--udp-port 6020] [--multicast 225.255.255.255] [--http-port 8000] [--no-browser]
+       [--data-dir DIR] [--replay FILE]
 """
 
 import argparse
@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 from aiohttp import WSMsgType, web
 
-from WaterColumnPlotter.Web import gridding, receiver, replay, worker
+from WaterColumnPlotter.Web import filedialog, gridding, receiver, replay, worker
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +115,7 @@ class Server:
                               'dataDir': str(Path(args.data_dir).resolve())}
         self.stats = {}
         self.clients = set()
+        self.dialog_open = False  # the native Open dialog is showing
 
         self.ctx = ctx = multiprocessing.get_context('spawn')
         self.dg_queue = ctx.Queue()
@@ -233,6 +234,34 @@ class Server:
             return web.json_response({'error': f"Can't open {request.query.get('dir')}: {e.strerror or e}"})
         return web.json_response({'dir': str(path), 'parent': str(path.parent) if path.parent != path else None,
                                   'dirs': dirs, 'files': files})
+
+    async def choose_file(self, request):
+        """
+        Show the operating system's Open dialog on the plotter's computer, for a browser on that computer, and replay
+        the file chosen. Returns {'path'}, {'cancelled': true}, or {'unavailable': reason} when a browser elsewhere
+        asked (the dialog would appear on a screen its viewer can't see) or no dialog can be shown; the page then
+        offers its own file browser instead.
+        """
+        try:
+            local = ipaddress.ip_address(request.remote or '').is_loopback
+        except ValueError:
+            local = False
+        if not local:
+            return web.json_response({'unavailable': "the plotter is on another computer"})
+        if self.dialog_open:
+            return web.json_response({'busy': True})
+        self.dialog_open = True
+        try:
+            path = await filedialog.choose_recording(self.source_config['dataDir'])
+        except filedialog.Unavailable as e:
+            logger.warning("No native file dialog: %s", e)
+            return web.json_response({'unavailable': str(e)})
+        finally:
+            self.dialog_open = False
+        if path is None:
+            return web.json_response({'cancelled': True})
+        await self.source_command({'cmd': 'open', 'path': path})
+        return web.json_response({'path': path})
 
     async def websocket(self, request):
         ws = web.WebSocketResponse(heartbeat=30)
@@ -364,6 +393,7 @@ class Server:
         app.router.add_get('/', self.index)
         app.router.add_get('/ws', self.websocket)
         app.router.add_get('/browse', self.browse)
+        app.router.add_post('/choose-file', self.choose_file)
         app.router.add_static('/static/', STATIC_DIR)
         app.on_startup.append(self.on_startup)
         app.on_shutdown.append(self.on_shutdown)

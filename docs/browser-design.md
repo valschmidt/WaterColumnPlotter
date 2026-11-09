@@ -11,7 +11,7 @@ Status: prototype in progress (November 2026). The PyQt5 GUI remains in the repo
 
 ## Architecture
 
-One command (`water_column_plotter_web`) starts one Python program, which opens the default browser at
+One command (`wcp`) starts one Python program, which opens the default browser at
 `http://localhost:8000`.
 
 ```
@@ -36,9 +36,13 @@ recorded .kmall/.kmwcd file ------> worker process: pykmall parse -> grid -> pie
   - Real-time: Configure… sets the UDP listen address, port and multicast group (initially `--udp-ip`, `--udp-port`,
     `--multicast`). Changing them restarts the receiver; if it can't open the socket, the error is shown in the bar and replay still
     works.
-  - Replay: choosing Replay opens a dialog for browsing the plotter computer's directories (served by `/browse`,
-    starting in `--data-dir`, by default the current directory or the `--replay FILE` file's) for a .kmall / .kmwcd
-    file; after that, a menu offers the other recordings in the same directory. The file is played through the
+  - Replay: choosing Replay (or Browse…) opens the operating system's own Open dialog on the plotter's computer
+    (`Web/filedialog.py`, via `POST /choose-file`: AppleScript on macOS, PowerShell's OpenFileDialog on Windows,
+    zenity or kdialog on Linux, else Tk), starting in `--data-dir`, by default the current directory or the
+    `--replay FILE` file's. A page can't get the path of a file chosen in the browser's own file picker, and the
+    replay reads the file from the plotter's disk, so the server shows the dialog. A browser on another computer
+    (which couldn't see that dialog), or a computer with no dialog available, gets the page's own browser of the
+    plotter computer's directories instead (served by `/browse`). Either way, a .kmall / .kmwcd file; after that, a menu offers the other recordings in the same directory. The file is played through the
     worker in place of real-time data, which is ignored meanwhile.
     The worker indexes the file with `kmall.index_file` and reads its #MWC, #SVP and #IIP datagrams itself, paced by
     their timestamps at a chosen speed (0.5x to 10x, or as fast as they can be processed), so playback waits for

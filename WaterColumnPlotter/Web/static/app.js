@@ -1128,13 +1128,13 @@ async function loadFileMenu() {
 for (const b of sourceBar.querySelectorAll('.segmented button')) {
   b.addEventListener('click', () => {
     if (b.dataset.mode === 'replay') {
-      if (source.mode !== 'replay') openBrowser();  // switches once a file is chosen
+      if (source.mode !== 'replay') chooseRecording();  // switches once a file is chosen
     } else if (source.mode !== 'realtime') {
       sourceCommand('realtime');
     }
   });
 }
-sourceEl.browse.addEventListener('click', () => openBrowser());
+sourceEl.browse.addEventListener('click', () => chooseRecording());
 sourceEl.file.addEventListener('change', () => {
   if (sourceEl.file.value) sourceCommand('open', { path: joinPath(source.config.dataDir, sourceEl.file.value) });
 });
@@ -1203,6 +1203,22 @@ async function browseTo(dir) {
 function openBrowser() {
   browser.dialog.showModal();
   browseTo(source.config.dataDir);
+}
+
+// Choosing a recording: in the operating system's own Open dialog, which the server shows on the plotter's computer
+// when this browser is on it; otherwise (viewing from another computer, or no dialog available) in the page's browser.
+let nativeDialog = true;
+async function chooseRecording() {
+  if (!nativeDialog) { openBrowser(); return; }
+  sourceEl.browse.disabled = true;
+  try {
+    const result = await (await fetch('/choose-file', { method: 'POST' })).json();
+    if (result.unavailable) { nativeDialog = false; openBrowser(); }
+  } catch (e) {
+    sourceEl.error.textContent = 'Lost connection to the plotter.';
+  } finally {
+    sourceEl.browse.disabled = false;
+  }
 }
 browser.up.addEventListener('click', () => { if (browser.parent) browseTo(browser.parent); });
 browser.dir.addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); browseTo(browser.dir.value.trim()); } });

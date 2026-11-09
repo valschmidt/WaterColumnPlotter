@@ -1,5 +1,5 @@
-numpy~=2.5
+# Dependencies of the browser plotter (wcp), the same as pyproject.toml's. Installing the package with
+# "pip install -e ." installs these; add ".[gui]" for the original Qt GUI's (PyQt5, pyqtgraph).
+aiohttp>=3.9
+numpy>=2.0
 pykmall>=1.1.2
-PyQt5~=5.15.11
-pyqtgraph~=0.14.0
-aiohttp~=3.14

@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "WaterColumnPlotter"
 version = "0.0.1"
 description = "Package for real-time water column data visualization."
+readme = "README.md"
 authors = [{ name = "Lynette Davis", email = "ldavis@ccom.unh.edu" }, { name = "Val Schmidt", email = "Val.Schmidt@unh.edu" }]
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
@@ -15,8 +16,6 @@ dependencies = [
     "aiohttp>=3.9",
     "numpy>=2.0",
     "pykmall>=1.1.2",
-    "PyQt5>=5.15",
-    "pyqtgraph>=0.13",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -27,6 +26,14 @@ classifiers = [
     "Topic :: Scientific/Engineering :: GIS",
 ]
 
+[project.optional-dependencies]
+# The original Qt desktop GUI (water_column_plotter); the browser version (wcp) doesn't need it.
+# Install with: pip install -e ".[gui]"
+gui = [
+    "PyQt5>=5.15",
+    "pyqtgraph>=0.13",
+]
+
 [project.urls]
 Homepage = "https://github.com/monsterkittykitty/WaterColumnPlotter"
 
@@ -34,7 +41,7 @@ Homepage = "https://github.com/monsterkittykitty/WaterColumnPlotter"
 water_column_plotter = "WaterColumnPlotter.GUI.GUI_Main:main"
 
 [project.scripts]
-water_column_plotter_web = "WaterColumnPlotter.Web.app:main"
+wcp = "WaterColumnPlotter.Web.app:main"
 
 [tool.setuptools.packages.find]
 include = ["WaterColumnPlotter*"]

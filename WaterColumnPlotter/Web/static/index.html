@@ -75,7 +75,7 @@
     <span class="source-label">Source</span>
     <span class="segmented" role="group" aria-label="Data source">
       <button type="button" data-mode="realtime" aria-pressed="true" title="Plot datagrams from the sonar (or SIS / K-Controller) as they arrive over UDP.">Real-time</button>
-      <button type="button" data-mode="replay" aria-pressed="false" title="Plot a recorded .kmall / .kmwcd file, chosen in a file browser. Real-time data is ignored while replaying.">Replay</button>
+      <button type="button" data-mode="replay" aria-pressed="false" title="Plot a recorded .kmall / .kmwcd file, chosen in an Open dialog. Real-time data is ignored while replaying.">Replay</button>
     </span>
 
     <span id="realtime-controls" class="mode-controls">
@@ -85,7 +85,7 @@
     </span>
 
     <span id="replay-controls" class="mode-controls" hidden>
-      <button id="replay-browse" type="button" title="Choose a recorded file in another directory.">Browse…</button>
+      <button id="replay-browse" type="button" title="Choose a recorded file, in the computer's Open dialog.">Browse…</button>
       <select id="replay-file" aria-label="Recorded file" title="Recorded files in the same directory. Choosing one plays it from the start, clearing the display."></select>
       <button id="replay-play" type="button" disabled>Play</button>
       <label title="Playback speed relative to the recording. Max plays as fast as the data can be processed.">Speed
