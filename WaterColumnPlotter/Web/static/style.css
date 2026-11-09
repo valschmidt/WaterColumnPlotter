@@ -86,6 +86,7 @@ button[aria-pressed="true"] { background: var(--accent); color: #0b1220; }
 }
 #settings legend { padding: 0 4px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
 #settings label { display: flex; align-items: center; gap: 6px; }
+#settings label[hidden] { display: none; }
 #settings label input { margin-left: auto; width: 70px; }
 .swatch { display: inline-block; width: 12px; height: 3px; border-top: 2px dashed; }
 .swatch.h { color: rgb(255, 92, 220); }
@@ -208,6 +209,10 @@ select {
 }
 #source-bar[data-mode="replay"] .mode-badge { color: var(--status-replay); }
 .mode-badge.idle { color: var(--muted); }
+.mode-badge.busy { color: var(--accent); text-transform: none; letter-spacing: 0; }
+.mode-badge.busy::before { animation: badge-pulse 1s ease-in-out infinite alternate; }
+@keyframes badge-pulse { from { opacity: 1; } to { opacity: 0.2; } }
+@media (prefers-reduced-motion: reduce) { .mode-badge.busy::before { animation: none; } }
 .source-label { font-weight: 600; }
 .segmented { display: inline-flex; }
 .segmented button { border-radius: 0; }

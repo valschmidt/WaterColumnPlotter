@@ -153,6 +153,7 @@ version is replacing. To install it as well, use `pip install -e ".[gui]"` in pl
 
 ## Documentation
 
+- [Changelog](CHANGELOG.md): what has changed, newest first.
 - [Browser version design](docs/browser-design.md): how the plotter is put together.
 - [Experiments](docs/experiments.md): features being tried out, with notes and measurements.
 

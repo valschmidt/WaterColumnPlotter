@@ -41,7 +41,11 @@ PING_RATE_PINGS = 21
 MAX_PING_GAP_S = 5.0
 CALIBRATION_PICKS = 10
 
-RESET_SETTINGS = ('binSize_m', 'alongTrackAvg_swath', 'referenceToSurface', 'transducerDepth_m', 'sidelobeSuppression')
+RESET_SETTINGS = ('binSize_m', 'alongTrackAvg_swath', 'referenceToSurface', 'transducerDepth_m', 'sidelobeSuppression',
+                  'dualSwath')
+# dualSwath: which swaths of a dual-swath system's ping cycle are used, by swathAlongPosition (Kongsberg numbers them
+# along ship from 0); a single-swath system's one swath is always used.
+DUAL_SWATH = {'both': None, 'first': 0, 'second': 1}
 
 
 def band_weighted_depth(sums, counts, offset, band, bin_size):
@@ -89,7 +93,7 @@ class Worker:
         self.settings = dict(settings)
         self.km = kmall()
         self.svp = None  # latest cast: {'depth', 'speed', 'top', 'bottom'} (depths below the surface)
-        self.stats = {'processed': 0, 'no_bottom': 0, 'grid_too_large': 0, 'process_ms': 0.0,
+        self.stats = {'processed': 0, 'no_bottom': 0, 'grid_too_large': 0, 'swath_skipped': 0, 'process_ms': 0.0,
                       'ping_rate_hz': None, 'swaths_per_ping': None}
         self.ping_times = collections.deque(maxlen=PING_RATE_PINGS)  # (pingCnt, time) of recent ping cycles
         self.reset()
@@ -224,6 +228,11 @@ class Worker:
         dg = self.km.read_EMdgmMWC()
         self.note_ping(dg)
         s = self.settings
+        position = DUAL_SWATH[s['dualSwath']]
+        cmn = dg['cmnPart']
+        if position is not None and cmn['swathsPerPing'] > 1 and cmn['swathAlongPosition'] != position:
+            self.stats['swath_skipped'] += 1
+            return
         depth_offset = (s['transducerDepth_m'] or 0.0) if s['referenceToSurface'] else 0.0
         try:
             result = grid_mwc(dg, s['binSize_m'], depth_offset, s['sidelobeSuppression'], self.background)
@@ -346,6 +355,8 @@ class Source:
             self.start_over(True)
             logger.info("Source: %s", 'real-time' if cmd == 'realtime' else 'replay')
         elif cmd == 'open':
+            # Indexing a large file, or one on a slow or network drive, can take a while: say so meanwhile.
+            self.out_queue.put({'type': 'opening', 'name': os.path.basename(command['path'])})
             try:
                 opened = Replay(command['path'])
             except Exception as e:

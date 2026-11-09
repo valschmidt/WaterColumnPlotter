@@ -41,6 +41,7 @@ DEFAULT_SETTINGS = {
     'transducerDepth_m': None,  # below the waterline; set from #IIP when one is received (None: not yet known)
     'heaveAllowance_m': 1.0,    # room shown above 0 m when depths are measured from the transducer
     'sidelobeSuppression': 'off',
+    'dualSwath': 'both',         # dual-swath systems: 'both' swaths of each ping cycle, or only the 'first' or 'second'
     'backgroundSwaths': 10,      # 'ping_mean' sidelobe suppression: earlier swaths of the same fan averaged into each beam's background
     'layerMinLevel_dB': 1.0,    # layer tracking: minimum level above the profile's background
     # Thermocline tracking (after Cordero Ros, 2018)
@@ -63,6 +64,7 @@ SETTING_LIMITS = {
     'transducerDepth_m': (float, -100.0, 100.0),
     'heaveAllowance_m': (float, 0.0, 50.0),
     'sidelobeSuppression': ('choice', gridding.SIDELOBE_SUPPRESSION),
+    'dualSwath': ('choice', tuple(worker.DUAL_SWATH)),
     'backgroundSwaths': (int, 1, 100),
     'layerMinLevel_dB': (float, 0.1, 30.0),
     'thermoclineThreshold_dBpm': (float, 0.01, 50.0),
@@ -111,6 +113,7 @@ class Server:
         # the last file opened, where browsing starts). The mode and the file being replayed are the worker's ('source'
         # messages from it); the rest is kept here.
         self.source = {'mode': 'realtime'}
+        self.opening = None  # name of the file the worker is opening (indexing), until it reports the result
         self.source_config = {'udpIp': args.udp_ip, 'udpPort': args.udp_port, 'multicast': args.multicast or '',
                               'dataDir': str(Path(args.data_dir).resolve())}
         self.stats = {}
@@ -137,7 +140,7 @@ class Server:
     # ----- Messages to browsers -----
 
     def source_message(self):
-        return json.dumps({**self.source, 'type': 'source', 'config': self.source_config})
+        return json.dumps({**self.source, 'type': 'source', 'config': self.source_config, 'opening': self.opening})
 
     def settings_message(self):
         # Grid columns / rows averaged for the slices, so pages can draw them exactly as the worker uses them.
@@ -193,11 +196,17 @@ class Server:
                 if msg.get('svp'):  # source changed: the cast came from the other source
                     self.svp = None
                 await self.broadcast(json.dumps(msg))
+            elif msg['type'] == 'opening':
+                self.opening = msg['name']
+                await self.broadcast(self.source_message())
             elif msg['type'] == 'source':
                 if 'error' in msg:
                     await self.broadcast(json.dumps(msg))
+                    if self.opening is not None:  # the file couldn't be opened
+                        self.opening = None
+                        await self.broadcast(self.source_message())
                 else:
-                    self.source = msg
+                    self.source, self.opening = msg, None
                     await self.broadcast(self.source_message())
             elif msg['type'] == 'svp':
                 self.svp = json.dumps(msg)

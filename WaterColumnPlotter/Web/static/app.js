@@ -515,7 +515,7 @@ class Panel {
       ctx.fillStyle = '#9aa1ad';
       ctx.font = '13px system-ui, sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText('Waiting for data…', p.x + p.w / 2, p.y + p.h / 2);
+      ctx.fillText(source.opening ? `Opening ${source.opening}…` : 'Waiting for data…', p.x + p.w / 2, p.y + p.h / 2);
       return;
     }
     ctx.save();
@@ -535,6 +535,23 @@ class Panel {
     this.drawAxes();
     if (this.side) this.side(ctx, this);
     this.drawHistogram();
+    if (source.opening) this.drawNotice(`Opening ${source.opening}…`);
+  }
+
+  // A message over the plot, on a dark label so it reads over data.
+  drawNotice(text) {
+    const ctx = this.ctx, p = this.plot;
+    ctx.font = '600 14px system-ui, sans-serif';
+    const w = ctx.measureText(text).width + 32, h = 34, x = p.x + (p.w - w) / 2, y = p.y + (p.h - h) / 2;
+    ctx.fillStyle = 'rgba(17, 19, 23, 0.85)';
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 6);
+    ctx.fill();
+    ctx.fillStyle = '#e3e6eb';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, p.x + p.w / 2, y + h / 2);
+    ctx.textBaseline = 'alphabetic';
   }
 
   ticks(axis) {
@@ -1030,13 +1047,21 @@ function showSettings() {
   document.getElementById('transducer-depth').textContent = d === null
     ? 'Transducer depth not yet known (waiting for the installation datagram)'
     : `Transducer ${d.toFixed(2)} m below the surface`;
+  showBackgroundSwaths();
   markDirty(settingsForm);
 }
 
+// Background swaths applies only to the sidelobe suppression that averages recent swaths.
+function showBackgroundSwaths() {
+  document.getElementById('background-swaths').hidden = settingsForm.elements.sidelobeSuppression.value !== 'ping_mean';
+}
+settingsForm.elements.sidelobeSuppression.addEventListener('change', showBackgroundSwaths);
 
-settingsForm.elements.sidelobeSuppression.addEventListener('change', ev => {
-  send({ type: 'settings', settings: { sidelobeSuppression: ev.target.value } });
-});
+for (const name of ['sidelobeSuppression', 'dualSwath']) {
+  settingsForm.elements[name].addEventListener('change', ev => {
+    send({ type: 'settings', settings: { [name]: ev.target.value } });
+  });
+}
 
 // The depth reference applies as soon as it is ticked, like the toolbar checkboxes.
 settingsForm.elements.referenceToSurface.addEventListener('change', ev => {
@@ -1091,6 +1116,7 @@ function showSource() {
   sourceEl.badge.textContent = !replaying ? 'Real-time'
     : !r ? 'Replay · no file' : r.playing ? 'Replaying' : r.finished ? 'Replay ended' : 'Replay paused';
   sourceEl.summary.textContent = `UDP ${c.udpIp}:${c.udpPort}` + (c.multicast ? ` · multicast ${c.multicast}` : '');
+  showOpening();
 
   sourceEl.file.hidden = !r;
   for (const el of [sourceEl.play, sourceEl.speed, sourceEl.position]) el.disabled = !r;
@@ -1109,6 +1135,30 @@ function showSource() {
     sourceEl.time.textContent = 'Browse… to choose a recording';
   }
   if (realtimeConfig.hidden) fillConfig();
+}
+
+// While the plotter opens a file it reads through it to index its datagrams, which takes a while for a large file or
+// one on a slow or network drive, and nothing else happens meanwhile: say so, with the time taken so far.
+let openingSince = null, openingTimer = null;
+let shownOpening = null;  // what the plots last said was opening
+function showOpening() {
+  const badge = sourceEl.badge;
+  if ((source.opening || null) !== shownOpening) {
+    shownOpening = source.opening || null;
+    for (const p of Object.values(panels)) p.draw();
+  }
+  if (!source.opening) {
+    if (openingTimer) { clearInterval(openingTimer); openingTimer = null; openingSince = null; }
+    badge.classList.remove('busy');
+    badge.removeAttribute('title');
+    return;
+  }
+  if (!openingTimer) { openingSince = Date.now(); openingTimer = setInterval(showOpening, 1000); }
+  const seconds = Math.floor((Date.now() - openingSince) / 1000);
+  badge.classList.add('busy');
+  badge.textContent = `Opening ${source.opening}…` + (seconds ? ` ${seconds} s` : '');
+  badge.title = 'Reading through the file to index its datagrams. A large file, or one on a slow or network drive, ' +
+    'can take a while; data appears once it is done.';
 }
 
 // The file menu: the other recordings in the replayed file's directory.
@@ -1298,7 +1348,8 @@ function showStats(stats) {
   }
   // The sonar's ping rate, from the data's timestamps (the recorded rate when replaying).
   if (stats.ping_rate_hz) {
-    const swaths = stats.swaths_per_ping > 1 ? ` × ${stats.swaths_per_ping} swaths` : '';
+    const only = state.settings && state.settings.dualSwath !== 'both' ? ` (${state.settings.dualSwath} shown)` : '';
+    const swaths = stats.swaths_per_ping > 1 ? ` × ${stats.swaths_per_ping} swaths${only}` : '';
     rate = `${stats.ping_rate_hz.toFixed(1)} pings/s${swaths} · ` + rate;
   }
   lastStats = { at: now, count, replaying, tooLarge: stats.grid_too_large ?? 0 };

@@ -9,9 +9,10 @@ Ideas being tried on the browser plotter. Some may not be kept.
 | Faint grid | Toolbar "Grid" (per viewer) | Lines at the axis ticks. |
 | Color maps | Toolbar "Colors": viridis, jet, grayscale (per viewer) | Applies to all plots and histogram color bars. |
 | Sound speed profile | Strip right of the vertical slice | Latest #SVP, on the vertical slice's depth scale (shifted by the transducer depth when depths are measured from the transducer), with grid lines when the grid is on. The orange dashed line marks the strongest sound speed gradient in view (the velocline); the shaded band is the cast's thermocline, its bottom dashed. |
+| Dual-swath selection | Settings > Pie grid > Swaths: Both / First only / Second only (shared) | Swaths not chosen (by #MWC `swathAlongPosition`, 0 or 1) are skipped before gridding, so the pie and both slices use only the chosen one; along-track averages then count only chosen swaths. Single-swath systems ignore it. The status line shows e.g. "× 2 swaths (first shown)". Changing it clears the display. |
 | Sidelobe suppression | Settings > Pie grid (shared) | See below. Applies before gridding, so the pie and both slices are corrected. |
 | Layer tracking | Toolbar "Tracking: Layers" (per viewer); Settings > Vertical slice > Layer threshold (shared) | `Web/layers.py`, see below. Any number of layers. |
-| Data source: real-time or replay | Source bar under the toolbar: Configure… sets the UDP address; Replay opens a file browser; `--replay FILE`, `--data-dir DIR` (shared) | `Web/replay.py` plays a recorded file (play/pause, speed, seek). See browser-design.md. |
+| Data source: real-time or replay | Source bar under the toolbar: Configure… sets the UDP address; Replay opens the OS Open dialog (the page's own browser for remote viewers); while a file is being indexed, the source badge and the plots say "Opening <file>…" with the seconds so far; `--replay FILE`, `--data-dir DIR` (shared) | `Web/replay.py` plays a recorded file (play/pause, speed, seek). See browser-design.md. |
 | Horizontal slice depth | Horizontal slice header: Amplitude / Depth / Depth, shaded (per viewer) | See below. |
 | Thermocline tracking and cast alert | Toolbar "Tracking: Thermocline" (per viewer); Settings > Thermocline (shared) | `Web/thermocline.py`, after Cordero Ros (2018), see below. One feature: the thermocline bottom. |
 
