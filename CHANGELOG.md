@@ -18,7 +18,8 @@ On the `wreck-detect` branch, being tried out.
   A box drawn on the pie starts with the swaths the pie shows as its time span. The box is violet (the white line is
   still the pie's time); on a plot that doesn't pass through it (a slice whose band misses it, or the pie showing
   other swaths) it is dashed. A box's edges move one at a time; drag inside it to move it. **Clear box**, or turning
-  Wreck off, removes it.
+  Wreck off, removes it. Until the box is complete the cursor stays a cross-hair and the slice bands and pie time
+  line can't be dragged (set them before starting), so every drag goes to the box.
   In every swath and across-track cell inside the box, the shallowest cell at or above the **Threshold** is marked
   with a pink dot, and the shallowest of all with a large ringed dot, on all three plots (on the pie, the dots of
   swaths it isn't showing are faint). The bar gives that depth and compares it with the sonar's own bottom detections
@@ -37,6 +38,9 @@ On the `wreck-detect` branch, being tried out.
 
 ### Changed
 - The horizontal slice's depth band is now amber (was magenta), so the pink wreck detections stand out.
+- The position shown above each plot is shorter (for example "-1234 swaths, 07:17:37 UTC, depth: 12.3 m, -45.6 dB"),
+  and stays shown when the mouse is over something that can be dragged or a wreck detection, with a short note about
+  it after a "·".
 
 ## 2026-11-09
 

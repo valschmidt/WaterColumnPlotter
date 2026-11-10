@@ -471,7 +471,9 @@ class Panel {
         return;
       }
       const hover = !drag && this.hitHandle(ev.offsetX, ev.offsetY);
-      c.style.cursor = this.inHist(ev.offsetX, ev.offsetY) ? 'ns-resize' : hover ? handleCursor(hover) : 'crosshair';
+      // A cross-hair throughout while a wreck box is being set up, so it's clear a box (or its line) is to be dragged.
+      c.style.cursor = this.inHist(ev.offsetX, ev.offsetY) ? 'ns-resize'
+        : hover && !wreckSelecting() ? handleCursor(hover) : 'crosshair';
       if (drag) {
         const p = this.plot, v = drag.view;
         const dx = (ev.offsetX - drag.x) / p.w * (v.x1 - v.x0);
@@ -523,7 +525,11 @@ class Panel {
     if (!this.handles || !this.view) return null;
     const p = this.plot;
     if (sx < p.x || sx > p.x + p.w || sy < p.y || sy > p.y + p.h) return null;
+    // While a wreck box is being set up, only its own edges and lines can be grabbed: the slice bands and pie time
+    // stay put, so a drag draws the box.
+    const selecting = wreckSelecting();
     for (const h of this.handles()) {
+      if (selecting && h.kind !== 'box') continue;
       if (h.kind === 'box') {
         const [ax, ay] = this.toScreen(h.x[0], h.y[0]), [bx, by] = this.toScreen(h.x[1], h.y[1]), tol = 6;
         const x0 = Math.min(ax, bx), x1 = Math.max(ax, bx), y0 = Math.min(ay, by), y1 = Math.max(ay, by);
@@ -688,14 +694,16 @@ class Panel {
       return;
     }
     if (sx < p.x || sx > p.x + p.w || sy < p.y || sy > p.y + p.h) { this.readout.textContent = ''; return; }
-    // A point drawn on the plot (a wreck detection) describes itself.
-    const pointed = this.pointAt && this.pointAt(this, sx, sy);
-    if (pointed) { this.readout.textContent = pointed; return; }
-    const hit = this.hitHandle(sx, sy);
-    if (hit && hit.handle.label) { this.readout.textContent = hit.handle.label(hit.part); return; }
+    // Where the mouse is and the value there, then what is under it, if anything: a point drawn on the plot (a wreck
+    // detection) or a draggable indicator.
     const [x, y] = this.toWorld(sx, sy);
     const v = this.valueAt(x, y);
-    this.readout.textContent = this.describe(x, y) + (Number.isFinite(v) ? `   ${v.toFixed(this.unit === 'm' ? 2 : 1)} ${this.unit}` : '');
+    const here = this.describe(x, y) + (Number.isFinite(v) ? `, ${v.toFixed(this.unit === 'm' ? 2 : 1)} ${this.unit}` : '');
+    const pointed = this.pointAt && this.pointAt(this, sx, sy);
+    const hit = !pointed && this.hitHandle(sx, sy);
+    const note = pointed || (hit && hit.handle.label && hit.handle.label(hit.part));
+    this.readout.textContent = note ? `${here} · ${note}` : here;
+    this.readout.title = this.readout.textContent;  // in full, if it doesn't fit
   }
 
   draw() {
@@ -889,7 +897,7 @@ function pieTimeHandle() {
   if (!span) return [];
   return [{
     axis: 'x', kind: 'line', at: span[1], set: x => setPieSeq(buffer.newestSeq() + Math.round(x)),
-    label: () => `Pie: ${utc(state.pieShown.t)} UTC (drag to step through time; to the right end to follow live data)`,
+    label: () => `pie time ${utc(state.pieShown.t)}: drag to step through time`,
   }];
 }
 function drawPieTime(ctx, panel) {
@@ -909,19 +917,14 @@ const sliceHandle = (axis, which) => ({
   set: (lo, hi) => setSlice(which, lo, hi), done: saveSlices,
   label: part => {
     const [a, b] = which === 'depth' ? depthBand() : acrossBand(), how = part === 'move' ? 'drag to move' : 'drag to resize';
-    return which === 'depth' ? `Horizontal slice: ${a.toFixed(1)} to ${b.toFixed(1)} m deep (${how})`
-      : `Vertical slice: ${a.toFixed(1)} to ${b.toFixed(1)} m across (${how})`;
+    return `${which === 'depth' ? 'horizontal' : 'vertical'} slice ${a.toFixed(1)} to ${b.toFixed(1)} m: ${how}`;
   },
 });
 
-// The swath under x (swaths from the newest) on the slices, if held.
-function swathAt(x) {
-  const last = buffer.newestSeq();
-  return last === null ? null : buffer.get(last + Math.ceil(x));
-}
+// The swaths from the newest at x on the slices, and the time of the swath there if it is held.
 function describeSwath(x) {
-  const sw = swathAt(x);
-  return `${Math.max(0, Math.round(-x))} swaths ago${sw ? ' (' + utc(sw.t) + ' UTC)' : ''}`;
+  const last = buffer.newestSeq(), sw = last === null ? null : buffer.get(last + Math.ceil(x));
+  return `${Math.min(0, Math.round(x))} swaths${sw ? ', ' + utc(sw.t) + ' UTC' : ''}`;
 }
 
 const panels = {
@@ -930,7 +933,7 @@ const panels = {
     yLabel: 'Depth below transducer (m)',
     pinTop: true,
     equalAspect: true,
-    describe: (x, y) => `across ${x.toFixed(1)} m, depth ${y.toFixed(1)} m`,
+    describe: (x, y) => `across: ${x.toFixed(1)} m, depth: ${y.toFixed(1)} m`,
     overlay: (ctx, panel) => {
       if (!state.settings) return;
       band(ctx, panel, 'y', ...depthBand(), SLICE_H_COLOR);
@@ -950,7 +953,7 @@ const panels = {
       const [lo, hi] = depthBand();
       return { lo, hi };
     },
-    describe: (x, y) => `${describeSwath(x)}, across ${y.toFixed(1)} m`,
+    describe: (x, y) => `${describeSwath(x)}, across: ${y.toFixed(1)} m`,
     overlay: (ctx, panel) => {
       if (!state.settings) return;
       band(ctx, panel, 'y', ...acrossBand(), SLICE_V_COLOR);
@@ -965,7 +968,7 @@ const panels = {
     xLabel: 'Swaths (0 = newest)',
     yLabel: 'Depth below transducer (m)',
     pinTop: true,
-    describe: (x, y) => `${describeSwath(x)}, depth ${y.toFixed(1)} m`,
+    describe: (x, y) => `${describeSwath(x)}, depth: ${y.toFixed(1)} m`,
     overlay: (ctx, panel) => {
       if (!state.settings) return;
       band(ctx, panel, 'y', ...depthBand(), SLICE_H_COLOR);
@@ -994,6 +997,8 @@ const WRECK_HIST_BINS = 60;
 const WRECK_AXES = { vertical: ['seq', 'depth'], horizontal: ['seq', 'across'], pie: ['across', 'depth'] };
 
 function wreckComplete() { const w = state.wreck; return !!(w.seq && w.depth && w.across); }
+// Wreck mode with the box not yet complete.
+function wreckSelecting() { return state.wreck.on && !wreckComplete(); }
 
 // A dimension as a world range on a plot axis (swaths: x, swaths from the newest). One not yet set is a line where
 // the slice is (depth, across-track) or at the pie's time (swaths), to be dragged out into a box.
@@ -1043,8 +1048,7 @@ function wreckHandle(id) {
   if (!box) return [];
   return [{
     kind: 'box', x: box.x, y: box.y, set: (x, y) => setWreckBox(id, x, y),
-    label: part => part === 'move' ? 'Wreck box: drag to move it'
-      : 'Wreck box: drag the edge to resize (a line: drag it out into a box)',
+    label: part => part === 'move' ? 'wreck box: drag to move' : 'wreck box: drag to resize',
   }];
 }
 
@@ -1192,8 +1196,8 @@ function wreckPointAt(panel, sx, sy) {
   if (!best) return null;
   const b = state.settings.binSize_m, sw = buffer.get(best.seq);
   const side = best.across < 0 ? `${(-best.across).toFixed(1)} m port` : `${best.across.toFixed(1)} m stbd`;
-  let text = `${best === w.least ? 'Shallowest' : 'Detection'}: ${best.depth.toFixed(2)} ±${(b / 2).toFixed(2)} m ` +
-    `${depthRef()}, ${side}, ${best.level.toFixed(1)} dB${sw ? ', ' + utc(sw.t) : ''}`;
+  let text = `${best === w.least ? 'shallowest' : 'detection'} ${best.depth.toFixed(2)} ±${(b / 2).toFixed(2)} m, ` +
+    `${side}, ${best.level.toFixed(1)} dB${sw ? ', ' + utc(sw.t) : ''}`;
   const key = `${best.seq}:${best.across}:${best.depth}`, found = wreckLocated.get(key);
   if (found === undefined) {
     wreckLocated.set(key, 'pending');
@@ -1201,12 +1205,12 @@ function wreckPointAt(panel, sx, sy) {
       body: JSON.stringify({ seq: best.seq, across: best.across, depth: best.depth }) })
       .then(r => r.json()).then(p => {
         wreckLocated.set(key, p);
-        if (panel.lastPointed === key) panel.readout.textContent = wreckPointAt(panel, sx, sy) || panel.readout.textContent;
+        if (panel.lastPointed === key) panel.updateReadout(sx, sy);
       }).catch(() => wreckLocated.delete(key));
   } else if (found && found.lat !== undefined) {
     const lat = `${Math.abs(found.lat).toFixed(6)}° ${found.lat < 0 ? 'S' : 'N'}`;
     const lon = `${Math.abs(found.lon).toFixed(6)}° ${found.lon < 0 ? 'W' : 'E'}`;
-    text += ` · corrected ${found.depth_wl.toFixed(2)} ±${found.u_vert.toFixed(2)} m below waterline, ${lat} ${lon}`;
+    text += `; corrected ${found.depth_wl.toFixed(2)} ±${found.u_vert.toFixed(2)} m below WL, ${lat} ${lon}`;
   }
   panel.lastPointed = key;
   return text;
