@@ -44,7 +44,7 @@ let LUT = LUTS.viridis;
 const SLICE_H_COLOR = 'rgba(255, 170, 60, 0.9)';   // horizontal slice band (depth)
 const SLICE_V_COLOR = 'rgba(80, 220, 255, 0.9)';   // vertical slice band (across-track)
 const WRECK_DOT = '#ff3fd0';                         // wreck detections
-const WRECK_BOX = 'rgba(255, 255, 255, 0.9)';        // the wreck box (prism)
+const WRECK_BOX = 'rgb(210, 175, 255)';      // the wreck box (prism): violet, apart from the white pie time line
 const BOTTOM_DOT = 'rgba(200, 205, 215, 0.75)';     // the sonar's bottom detections under the wreck box
 
 // ---------------------------------------------------------------------------
@@ -65,9 +65,10 @@ const state = {
   svp: null,           // {time, depth_m: [], speed_mps: []}, depths below the water surface
   // Wreck detection (this viewer's own): a box (prism) of swaths [s0, s1] (inclusive), depths [top, bottom] and
   // across-track [port, starboard] (m), each null until drawn; detections in it, and the sonar's bottom detections
-  // under it. See detectWreck.
+  // under it. See detectWreck. max: once the box is complete, the slices and pie show the strongest cell feeding each
+  // pixel, not the mean (see sliceMax).
   wreck: { on: false, seq: null, depth: null, across: null, threshold: null, detections: [], least: null, bottoms: [],
-    bottomLeast: null },
+    bottomLeast: null, max: true },
 };
 
 // ---------------------------------------------------------------------------
@@ -1032,6 +1033,8 @@ function setWreckBox(id, xr, yr) {
       w[dim] = [lo, hi];
     }
   });
+  // A box drawn on the pie is of the swaths the pie shows, until its time span is dragged on a slice.
+  if (id === 'pie' && !w.seq && state.pieShown) w.seq = [state.pieShown.seq0, state.pieShown.seq1];
   wreckChanged();
 }
 
@@ -1113,15 +1116,30 @@ function drawWreck(ctx, panel) {
   if (!w.on) return;
   const id = panel.el.id, box = wreckBox(id), last = buffer.newestSeq(), sh = state.pieShown;
   if (box) {
-    const [ax, ay] = panel.toScreen(box.x[0], box.y[0]), [bx, by] = panel.toScreen(box.x[1], box.y[1]);
-    // On the pie: dashed while it shows swaths outside the box.
-    const outside = id === 'pie' && w.seq && sh && (sh.seq1 < w.seq[0] || sh.seq0 > w.seq[1]);
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.06)';
+    let [ax, ay] = panel.toScreen(box.x[0], box.y[0]), [bx, by] = panel.toScreen(box.x[1], box.y[1]);
+    // At least 3 px each way, and inside the plot, so a line not yet dragged out (on the newest swath, say) shows.
+    const p = panel.plot, grow = (a, b, lo, hi) => {
+      if (b - a < 3) { const m = (a + b) / 2; a = m - 1.5; b = m + 1.5; }
+      const shift = Math.min(0, hi - 1 - b) + Math.max(0, lo + 1 - a);
+      return [a + shift, b + shift];
+    };
+    [ax, bx] = grow(Math.min(ax, bx), Math.max(ax, bx), p.x, p.x + p.w);
+    [ay, by] = grow(Math.min(ay, by), Math.max(ay, by), p.y, p.y + p.h);
+    // Dashed where the plot doesn't pass through the box: the pie showing swaths outside its time span, or a slice
+    // whose band misses it (the horizontal slice's depth band, the vertical slice's across-track band).
+    const misses = (band, range) => range && (band[1] <= range[0] || band[0] >= range[1]);
+    const outside = id === 'pie' ? w.seq && sh && (sh.seq1 < w.seq[0] || sh.seq0 > w.seq[1])
+      : id === 'horizontal' ? misses(depthBand(), w.depth) : misses(acrossBand(), w.across);
+    ctx.fillStyle = 'rgba(190, 150, 255, 0.10)';
     ctx.fillRect(ax, ay, bx - ax, by - ay);
+    // A thick line over a dark outline, so it stands out on any color of the plot.
+    ctx.setLineDash(outside ? [7, 5] : []);
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.75)';
+    ctx.lineWidth = 4.5;
+    ctx.strokeRect(ax, ay, bx - ax, by - ay);
     ctx.strokeStyle = WRECK_BOX;
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash(outside ? [5, 4] : []);
-    ctx.strokeRect(ax, ay, bx - ax, by - ay);  // a line while one of its dimensions isn't set
+    ctx.lineWidth = 2.5;
+    ctx.strokeRect(ax, ay, bx - ax, by - ay);
     ctx.setLineDash([]);
     ctx.lineWidth = 1;
   }
@@ -1219,8 +1237,21 @@ function showWreckGeo(stats) {
 
 function wreckChanged() {
   detectWreck();
+  // The plots switch between mean and strongest (sliceMax) when the box is set or cleared, or Max is changed.
+  const max = sliceMax();
+  if (max !== shownMax) {
+    shownMax = max;
+    for (const p of Object.values(panels)) p.resetLevels();  // the strongest are on a different scale
+    scheduleRebuild();
+  }
   for (const p of Object.values(panels)) p.draw();
 }
+
+// Whether the slices and pie show the strongest cell feeding each pixel (wreck mode, the box complete and Strongest
+// chosen), rather than the mean. Where the slice bands cover the box, every detection then sits on a pixel at least as
+// strong as the threshold.
+function sliceMax() { const w = state.wreck; return w.on && wreckComplete() && w.max; }
+let shownMax = false;
 
 function clearWreck() {
   Object.assign(state.wreck, { seq: null, depth: null, across: null, detections: [], least: null, bottoms: [],
@@ -1234,6 +1265,7 @@ function setWreckMode(on) {
   w.on = on;
   wreckToggle.setAttribute('aria-pressed', String(on));
   wreckBar.hidden = !on;
+  if (!on) clearWreck();  // leaving wreck mode removes the box and its detections
   // The threshold starts at the top of the pie's color scale.
   if (on && w.threshold === null) setWreckThreshold(panels.pie.levels ? Math.round(panels.pie.levels[1] * 2) / 2 : 0);
   wreckChanged();
@@ -1247,6 +1279,10 @@ function setWreckThreshold(v) {
   wreckChanged();
 }
 wreckEl.threshold.addEventListener('input', () => setWreckThreshold(parseFloat(wreckEl.threshold.value)));
+document.getElementById('wreck-plots').addEventListener('change', ev => {
+  state.wreck.max = ev.target.value === 'max';
+  wreckChanged();
+});
 
 // The histogram of the levels in the box, beside the threshold: bars at and above the threshold pink. The threshold is
 // the white line, dragged (or clicked) to set it. Its range follows the box's levels, widened to show the threshold.
@@ -1315,7 +1351,7 @@ function showWreck() {
   if (!w.depth) missing.push('depth');
   if (!w.across) missing.push('across-track');
   wreckEl.help.textContent = !missing.length ? ''
-    : w.seq || w.depth || w.across ? `Drag the white line out to set ${missing.join(' and ')}`
+    : w.seq || w.depth || w.across ? `Drag the violet line out to set ${missing.join(' and ')}`
     : 'Drag a box around the target on any plot';
   wreckEl.exportButton.disabled = !w.detections.length;
   drawWreckHist();
@@ -1608,15 +1644,20 @@ const buffer = {
 function swathVertical(sw, c0, c1) {
   const key = `${c0}:${c1}`;
   if (sw.v && sw.v.key === key) return sw.v;
-  const sum = new Float32Array(sw.rows), n = new Uint16Array(sw.rows);
+  // max: the strongest cell's level in each row (for the slices' Max, see sliceMax).
+  const sum = new Float32Array(sw.rows), n = new Uint16Array(sw.rows), max = new Float32Array(sw.rows);
   const a = Math.max(c0, sw.col0) - sw.col0, b = Math.min(c1, sw.col0 + sw.cols) - sw.col0, q = sw.q, W = sw.cols;
   for (let r = 0; b > a && r < sw.rows; r++) {
-    let acc = 0, k = 0;
-    for (let i = r * W + a, end = r * W + b; i < end; i++) { const v = q[i]; if (v !== NO_DATA) { acc += v; k++; } }
+    let acc = 0, k = 0, m = -1;
+    for (let i = r * W + a, end = r * W + b; i < end; i++) {
+      const v = q[i];
+      if (v !== NO_DATA) { acc += v; k++; if (v > m) m = v; }
+    }
     sum[r] = k * sw.base + sw.step * acc;
     n[r] = k;
+    max[r] = k ? sw.base + sw.step * m : NaN;
   }
-  return (sw.v = { key, sum, n });
+  return (sw.v = { key, sum, n, max });
 }
 
 // First and last row with data in each column of a swath (-1 where none).
@@ -1641,6 +1682,7 @@ function swathHorizontal(sw, r0, r1, bin, depthMode) {
   const key = `${r0}:${r1}:${bin}:${depthMode}`;
   if (sw.h && sw.h.key === key) return sw.h;
   const C = sw.cols, sum = new Float32Array(C), n = new Uint16Array(C), zw = new Float32Array(C), w = new Float32Array(C);
+  const max = new Int16Array(C).fill(-1);  // the strongest cell's q in each column
   const a = Math.max(r0, sw.row0) - sw.row0, b = Math.min(r1, sw.row0 + sw.rows) - sw.row0, q = sw.q;
   const whole = depthMode && r0 >= sw.row0 && r1 <= sw.row0 + sw.rows;
   let rows = null, amp = null;
@@ -1655,11 +1697,13 @@ function swathHorizontal(sw, r0, r1, bin, depthMode) {
       if (v === NO_DATA) continue;
       sum[c] += v;
       n[c]++;
+      if (v > max[c]) max[c] = v;
       if (whole && rows.first[c] <= a && rows.last[c] >= b - 1) { const A = amp[v]; zw[c] += A * z; w[c] += A; }
     }
   }
   for (let c = 0; c < C; c++) sum[c] = n[c] * sw.base + sw.step * sum[c];
-  return (sw.h = { key, sum, n, zw, w });
+  const maxLevel = Float32Array.from(max, v => v < 0 ? NaN : sw.base + sw.step * v);
+  return (sw.h = { key, sum, n, zw, w, max: maxLevel });
 }
 
 // A slice image from the buffer: which 'v' (rows: depth) or 'h' (rows: across-track). Its columns are the groups of
@@ -1678,16 +1722,25 @@ function buildSlice(which) {
   }
   const g0 = Math.floor(sw[0].seq / A), g1 = Math.floor(sw[sw.length - 1].seq / A), W = g1 - g0 + 1, H = hi - lo;
   const num = new Float32Array(W * H), den = new Float32Array(W * H);
+  const useMax = !depth && sliceMax(), best = useMax ? new Float32Array(W * H).fill(NaN) : null;
   for (const w of sw) {
     const c = which === 'v' ? swathVertical(w, i0, i1) : swathHorizontal(w, i0, i1, bin, depth);
     const top = depth ? c.zw : c.sum, bottom = depth ? c.w : c.n;
     const g = Math.floor(w.seq / A) - g0, off = (which === 'v' ? w.row0 : w.col0) - lo;
+    if (useMax) {
+      // The strongest cell over the band and the column's swaths.
+      for (let i = 0; i < c.max.length; i++) {
+        const v = c.max[i], k = (off + i) * W + g;
+        if (v > best[k] || (Number.isNaN(best[k]) && !Number.isNaN(v))) best[k] = v;
+      }
+      continue;
+    }
     for (let i = 0; i < top.length; i++) {
       if (bottom[i] > 0) { const k = (off + i) * W + g; num[k] += top[i]; den[k] += bottom[i]; }
     }
   }
-  const data = new Float32Array(W * H);
-  for (let k = 0; k < data.length; k++) data[k] = den[k] > 0 ? num[k] / den[k] : NaN;
+  const data = useMax ? best : new Float32Array(W * H);
+  if (!useMax) for (let k = 0; k < data.length; k++) data[k] = den[k] > 0 ? num[k] / den[k] : NaN;
   const last = sw[sw.length - 1].seq;
   return { data, W, H, lo, g0, x0: g0 * A - last - 1, x1: (g1 + 1) * A - last - 1 };
 }
@@ -1742,18 +1795,23 @@ function updatePie() {
     c0 = Math.min(c0, w.col0); c1 = Math.max(c1, w.col0 + w.cols);
   }
   const W = c1 - c0, H = r1 - r0, num = new Float32Array(W * H), den = new Uint16Array(W * H);
+  const useMax = sliceMax();  // the strongest of the swaths in each cell, not their mean
+  if (useMax) num.fill(-Infinity);
   for (const w of group) {
     const q = w.q;
     for (let r = 0; r < w.rows; r++) {
       const k0 = (w.row0 - r0 + r) * W + (w.col0 - c0), i0r = r * w.cols;
       for (let c = 0; c < w.cols; c++) {
         const v = q[i0r + c];
-        if (v !== NO_DATA) { num[k0 + c] += w.base + w.step * v; den[k0 + c]++; }
+        if (v === NO_DATA) continue;
+        const level = w.base + w.step * v;
+        if (useMax) { if (level > num[k0 + c]) num[k0 + c] = level; } else num[k0 + c] += level;
+        den[k0 + c]++;
       }
     }
   }
   const data = new Float32Array(W * H);
-  for (let k = 0; k < data.length; k++) data[k] = den[k] ? num[k] / den[k] : NaN;
+  for (let k = 0; k < data.length; k++) data[k] = den[k] ? (useMax ? num[k] : num[k] / den[k]) : NaN;
   state.pieShown = { seq0: group[0].seq, seq1, t: group[group.length - 1].t };
   const b = s.binSize_m, x0 = c0 * b, y0 = r0 * b, x1 = c1 * b, y1 = r1 * b;
   panels.pie.setImage({ w: W, h: H, data, x0, x1, y0, y1, ci0: c0, ri0: r0, extent: { x0, x1, y0, y1 } });

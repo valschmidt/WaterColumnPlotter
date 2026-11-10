@@ -99,13 +99,18 @@
 
   <div id="wreck-bar" class="bar" hidden title="Experimental wreck detection, yours only. Depths are the plotter's: straight rays at the sound speed at the transducer, heave-corrected, measured below the transducer (or the surface); not corrected for refraction, water level or datum. A field estimate, not a charted depth.">
     <span class="source-label">Wreck:</span>
+    <button id="wreck-clear" type="button" title="Remove the box and its detections, to start over. Turning Wreck off does too.">Clear box</button>
     <span id="wreck-help" class="wreck-help"></span>
     <label title="In each column of the box (one swath, one across-track cell), the shallowest cell at or above this level is a detection (pink). The largest dot, ringed in white, is the shallowest. Point at a detection on a plot for its depth and position.">Threshold
       <input id="wreck-threshold" type="number" step="0.5"> <span class="unit">dB</span></label>
     <canvas id="wreck-hist" class="wreck-hist" title="Levels of the cells in the box (square-root counts); pink: at or above the threshold (the white line). Drag or click to set the threshold."></canvas>
+    <label title="Once the box is complete, what each pixel of the slices and pie shows: the strongest cell feeding it (over the slice band, and the swaths averaged along track), or their mean, as usual. With Strongest, where the slice bands cover the box, every detection sits on a pixel at least as strong as the threshold.">Plots
+      <select id="wreck-plots">
+        <option value="max">Strongest</option>
+        <option value="mean">Mean</option>
+      </select></label>
     <span id="wreck-result" class="wreck-result"></span>
     <span id="wreck-geo" class="wreck-geo"></span>
-    <button id="wreck-clear" type="button" title="Remove the box, to draw a new one.">Clear</button>
     <button id="wreck-export" type="button" disabled title="Save the detections as a CSV file, with a header describing how the depths were found and what they are not corrected for.">Export CSV</button>
   </div>
 

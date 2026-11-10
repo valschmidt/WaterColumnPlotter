@@ -202,7 +202,17 @@ FMMidwater (uncorrected depths) and corrected it by the difference between the n
 and fully corrected depths ("Method One"). Here:
 
 - **The box (prism).** Swaths x depth x across-track, drawn on the plots (each plot sets the two it shows; one not
-  yet set is drawn as a line, dragged out into a box). Per viewer, not kept between sessions.
+  yet set is drawn as a line, at least 3 px wide and inside the plot, dragged out into a box; a box drawn on the pie
+  takes the pie's swaths as its time span). It is violet, dashed on a plot that doesn't pass through it (the pie
+  showing swaths outside its time span; a slice whose band misses it). Its edges move one at a time (the slice bands' edges move
+  symmetrically about their centre). Clear box, or turning Wreck off, removes it. Per viewer, not kept between
+  sessions.
+- **Strongest plots.** With Mean, a slice pixel averages its band's cells and the swaths of its along-track group, so
+  a detection can sit on a dim pixel (on the test file, at -25 dB, 637 of 1482 detections on the vertical slice and
+  all of them on the horizontal slice, by up to 27 dB) and look wrong. With Strongest (default once the box is
+  complete), each pixel shows the strongest cell feeding it (the pie: the strongest of its swaths), and none do, as long as
+  the slice bands cover the box (the slices are built from the bands, the detections from the box). It is speckled,
+  and on the horizontal slice a depth band reaching the seafloor shows only the seafloor.
 - **Detection** (in the page, on the gridded cells, so the threshold and box update the dots at once): in each column
   of the box (one swath, one across-track cell), the shallowest cell whose mean level is at or above the threshold.
   Depths are cell centres, +/- half a cell: use small cells (0.05-0.1 m) for wrecks. The threshold is set on a small

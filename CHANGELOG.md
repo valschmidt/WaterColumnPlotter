@@ -15,14 +15,20 @@ On the `wreck-detect` branch, being tried out.
   on a target such as a wreck's mast, after the least-depth workflow of Wyllie, Weber & Armstrong (US Hydrographic
   Conference 2015). Drag a box around the target on any plot: on the vertical slice it sets the swaths and depth, and
   shows as a line on the horizontal slice and the pie, which you drag out into a box to set the across-track width.
+  A box drawn on the pie starts with the swaths the pie shows as its time span. The box is violet (the white line is
+  still the pie's time); on a plot that doesn't pass through it (a slice whose band misses it, or the pie showing
+  other swaths) it is dashed. A box's edges move one at a time; drag inside it to move it. **Clear box**, or turning
+  Wreck off, removes it.
   In every swath and across-track cell inside the box, the shallowest cell at or above the **Threshold** is marked
   with a pink dot, and the shallowest of all with a large ringed dot, on all three plots (on the pie, the dots of
   swaths it isn't showing are faint). The bar gives that depth and compares it with the sonar's own bottom detections
   under the box (gray dots), in the same frame, so you can see how much shoaler the water column is than the
   bathymetry; its tooltip has the details. Beside the threshold, a small histogram of the levels in the box, with
   those at or above the threshold in pink: drag across it to set the threshold. Point at a detection on any plot for
-  its depth, place, level and time, and, when coordinates are available, its corrected depth and position. Boxes can
-  be moved and resized by their edges. Each viewer has their own.
+  its depth, place, level and time, and, when coordinates are available, its corrected depth and position. Once the
+  box is complete, **Plots: Strongest** (the default) shows in each pixel of the slices and pie the strongest cell
+  feeding it, rather than the mean; where the slice bands cover the box, every detection then sits on a pixel at
+  least as strong as the threshold. **Mean** shows the usual means. Each viewer has their own box.
 - **Export CSV** saves the detections, with a header saying how they were found and what they are not corrected for.
   With a Kongsberg sonar's #MRZ soundings (received over UDP, or when replaying a .kmwcd, read from the .kmall of the
   same name in the same folder, the one above or one beside it), each detection also gets a latitude, longitude and
