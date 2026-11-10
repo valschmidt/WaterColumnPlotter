@@ -163,6 +163,12 @@ or name one when starting:
 wcp --replay ~/data/0001_20260811_212442.kmwcd
 ```
 
+With **Play folder** checked (the default), when a file ends the next one in the same folder (same file type, by
+name) plays on without clearing the display, so a survey split into many short files plays as one.
+
+**Zooming.** Turn the mouse wheel over a plot to zoom, and drag to pan. Hold **H** while turning the wheel to zoom
+horizontally only, or **V** to zoom vertically only. Double-click the plot (or click **Auto-zoom**) to fit it again.
+
 **Viewing from other computers.** The page is served to this computer only, unless you start the plotter with
 `--http-host 0.0.0.0`; then browse to `http://<plotter's address>:8000/` from any computer on the network. Everyone
 viewing shares the same settings and data source.

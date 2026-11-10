@@ -89,6 +89,8 @@
           <option value="10">10×</option>
           <option value="0">Max</option>
         </select></label>
+      <label title="When a file ends, play on through the next recordings of the same type in its folder (by name), without clearing the display. Files that can't be played are skipped.">
+        <input id="replay-folder" type="checkbox" checked disabled> Play folder</label>
       <input id="replay-position" type="range" min="0" max="1" step="any" value="0" disabled aria-label="Position in the recording" title="Position in the recording. Moving it restarts the display from there.">
       <span id="replay-time" class="source-state"></span>
     </span>
@@ -179,7 +181,7 @@
         <h2>Pie</h2>
         <button class="live" type="button" aria-pressed="true" title="Show the newest swaths as they arrive. Dragging the pie's time line (white, in either slice) to an earlier time shows those swaths instead; click here, or drag the line back to the newest end, to follow the data again.">Live</button>
         <span class="pie-time"></span>
-        <button class="autozoom" type="button" aria-pressed="true" title="Fit this plot to the data as it arrives. Zooming (wheel) or panning (drag) turns it off; click here or double-click the plot to turn it back on.">Auto-zoom</button>
+        <button class="autozoom" type="button" aria-pressed="true" title="Fit this plot to the data as it arrives. Zooming (wheel; hold H to zoom horizontally only, V vertically only) or panning (drag) turns it off; click here or double-click the plot to turn it back on.">Auto-zoom</button>
         <span class="readout"></span>
         <span class="levels">
           <input class="lo" type="number" step="any" aria-label="Color scale minimum (dB)"> to
@@ -196,7 +198,7 @@
           <option value="depth">Depth</option>
           <option value="shaded">Depth, shaded</option>
         </select>
-        <button class="autozoom" type="button" aria-pressed="true" title="Fit this plot to the data as it arrives. Zooming (wheel) or panning (drag) turns it off; click here or double-click the plot to turn it back on.">Auto-zoom</button>
+        <button class="autozoom" type="button" aria-pressed="true" title="Fit this plot to the data as it arrives. Zooming (wheel; hold H to zoom horizontally only, V vertically only) or panning (drag) turns it off; click here or double-click the plot to turn it back on.">Auto-zoom</button>
         <span class="readout"></span>
         <span class="levels">
           <input class="lo" type="number" step="any" aria-label="Color scale minimum (dB)"> to
@@ -208,7 +210,7 @@
     <section class="panel" id="vertical">
       <div class="panel-head">
         <h2>Vertical slice</h2>
-        <button class="autozoom" type="button" aria-pressed="true" title="Fit this plot to the data as it arrives. Zooming (wheel) or panning (drag) turns it off; click here or double-click the plot to turn it back on.">Auto-zoom</button>
+        <button class="autozoom" type="button" aria-pressed="true" title="Fit this plot to the data as it arrives. Zooming (wheel; hold H to zoom horizontally only, V vertically only) or panning (drag) turns it off; click here or double-click the plot to turn it back on.">Auto-zoom</button>
         <span class="readout"></span>
         <span class="levels">
           <input class="lo" type="number" step="any" aria-label="Color scale minimum (dB)"> to

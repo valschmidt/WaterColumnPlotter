@@ -43,7 +43,10 @@ recorded .kmall/.kmwcd/.s7k file -> worker process: pykmall / pys7k parse -> gri
     replay reads the file from the plotter's disk, so the server shows the dialog. A browser on another computer
     (which couldn't see that dialog), or a computer with no dialog available, gets the page's own browser of the
     plotter computer's directories instead (served by `/browse`). Either way, a .kmall / .kmwcd file; after that, a menu offers the other recordings in the same directory. The file is played through the
-    worker in place of real-time data, which is ignored meanwhile.
+    worker in place of real-time data, which is ignored meanwhile. With **Play folder** (on by default; part of the
+    shared source state, `{'cmd': 'folder', 'on'}`), when a file ends the worker opens the next recording in its
+    folder with the same extension, by name (`Source.play_next`), skipping any it can't open, and plays on at the same
+    speed without clearing the display; the position slider then covers that file.
     The worker indexes the file with `kmall.index_file` and reads its #MWC, #SVP and #IIP datagrams itself, paced by
     their timestamps at a chosen speed (0.5x to 10x, or as fast as they can be processed), so playback waits for
     processing instead of dropping data, and no UDP partitioning is involved. Seeking clears the display and
@@ -181,7 +184,8 @@ so the history is also limited by memory:
   each update; it widens only if a level is set outside it. Double-clicking the histogram resets its range and levels.
 - Each plot has an "Auto-zoom" button in its header (on by default) that keeps it fitted to the data as it arrives;
   zooming (wheel) or panning (drag) that plot turns it off, and the button or a double-click turns it back on. Zoom
-  and pan are free in both directions.
+  and pan are free in both directions. Holding H while turning the wheel zooms horizontally only, and V vertically
+  only (exaggerating depth on the pie, for instance); the pie's equal aspect returns with auto-zoom.
 - Pie and vertical slice: when fitted, the top is 0 m (water surface) when referenced to the surface, otherwise the
   heave allowance above 0 m.
 - Horizontal and vertical slices: with auto-zoom on, the x-axis spans the full history and the newest ping stays at

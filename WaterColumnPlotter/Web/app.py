@@ -374,8 +374,8 @@ class Server:
     async def source_command(self, msg):
         """
         {'cmd': 'realtime' | 'replay'}: switch source. {'cmd': 'config', 'config': {...}}: change the UDP address
-        (restarting the receiver). Replay commands ({'cmd': 'open', 'path'}, 'play', 'pause', 'speed', 'seek') go to
-        the worker.
+        (restarting the receiver). Replay commands ({'cmd': 'open', 'path'}, 'play', 'pause', 'speed', 'seek',
+        'folder') go to the worker.
         """
         cmd = msg.get('cmd')
         if cmd == 'config':
@@ -388,8 +388,8 @@ class Server:
                 return
             self.source_config['dataDir'] = str(path.parent)
             self.control_queue.put({'cmd': 'open', 'path': str(path)})
-        elif cmd in ('realtime', 'replay', 'play', 'pause', 'speed', 'seek'):
-            self.control_queue.put({k: msg[k] for k in ('cmd', 'speed', 'time') if k in msg})
+        elif cmd in ('realtime', 'replay', 'play', 'pause', 'speed', 'seek', 'folder'):
+            self.control_queue.put({k: msg[k] for k in ('cmd', 'speed', 'time', 'on') if k in msg})
 
     async def change_source_config(self, requested):
         new = dict(self.source_config)

@@ -27,7 +27,7 @@ from PYS7K.registry import decode_record
 
 from WaterColumnPlotter.Web.gridding import EmptyPing, GridTooLarge, NoBackground, PingBackground, add_blocks, average, grid_7018, grid_mwc, vertical_band
 from WaterColumnPlotter.Web.layers import LayerTracker
-from WaterColumnPlotter.Web.replay import Replay
+from WaterColumnPlotter.Web.replay import Replay, list_directory
 from WaterColumnPlotter.Web.replay_s7k import S7kReplay
 from WaterColumnPlotter.Web.thermocline import ThermoclineTracker, depth_error, svp_thermocline
 
@@ -375,9 +375,10 @@ class Source:
         self.out_queue = out_queue
         self.mode = 'realtime'
         self.replay = None  # the file being replayed, if one is open
+        self.folder = True  # when a file ends, play on through the next ones in its folder
 
     def status(self):
-        status = {'type': 'source', 'mode': self.mode}
+        status = {'type': 'source', 'mode': self.mode, 'folder': self.folder}
         if self.replay is not None:
             status['replay'] = self.replay.status()
         return status
@@ -389,6 +390,42 @@ class Source:
             self.worker.svp = None
         self.out_queue.put({'type': 'reset', 'svp': new_source})
 
+    def open_replay(self, path):
+        """Open a recorded file to replay; None (and an error sent to the pages) if it can't be."""
+        # Indexing a large file, or one on a slow or network drive, can take a while: say so meanwhile.
+        self.out_queue.put({'type': 'opening', 'name': os.path.basename(path)})
+        try:
+            return S7kReplay(path) if path.lower().endswith('.s7k') else Replay(path)
+        except Exception as e:
+            logger.exception("Can't replay %s", path)
+            self.out_queue.put({'type': 'source', 'error': f"Can't replay {os.path.basename(path)}: {e}"})
+            return None
+
+    def play_next(self):
+        """
+        The file being replayed has ended: open the next recording in its folder (same extension, by name), skipping
+        any that can't be played, and play on at the same speed without clearing the display. Returns False at the end
+        of the folder.
+        """
+        directory, name = os.path.split(self.replay.path)
+        ext = os.path.splitext(name)[1].lower()
+        try:
+            names = [f['name'] for f in list_directory(directory)[1] if f['name'].lower().endswith(ext)]
+        except OSError:
+            return False
+        speed = self.replay.speed
+        for following in (n for n in names if n > name):
+            opened = self.open_replay(os.path.join(directory, following))
+            if opened is None:
+                continue
+            self.close_file()
+            opened.set_speed(speed)
+            self.replay = opened
+            logger.info("Replaying %s (next in folder)", opened.path)
+            self.out_queue.put(self.status())
+            return True
+        return False
+
     def close_file(self):
         if self.replay is not None:
             self.replay.close()
@@ -397,7 +434,8 @@ class Source:
     def command(self, command):
         """
         Apply a command from the server: 'realtime' or 'replay' (switch mode), {'cmd': 'open', 'path'}, 'play',
-        'pause', {'cmd': 'speed', 'speed'} or {'cmd': 'seek', 'time'}.
+        'pause', {'cmd': 'speed', 'speed'}, {'cmd': 'seek', 'time'} or {'cmd': 'folder', 'on'} (play on through the
+        folder).
         """
         cmd = command['cmd']
         replay = self.replay
@@ -407,15 +445,8 @@ class Source:
             self.start_over(True)
             logger.info("Source: %s", 'real-time' if cmd == 'realtime' else 'replay')
         elif cmd == 'open':
-            # Indexing a large file, or one on a slow or network drive, can take a while: say so meanwhile.
-            self.out_queue.put({'type': 'opening', 'name': os.path.basename(command['path'])})
-            try:
-                path = command['path']
-                opened = S7kReplay(path) if path.lower().endswith('.s7k') else Replay(path)
-            except Exception as e:
-                logger.exception("Can't replay %s", command['path'])
-                self.out_queue.put({'type': 'source', 'error':
-                                    f"Can't replay {os.path.basename(command['path'])}: {e}"})
+            opened = self.open_replay(command['path'])
+            if opened is None:
                 return
             self.close_file()
             self.replay, self.mode = opened, 'replay'
@@ -429,6 +460,8 @@ class Source:
             if cmd == 'play' and replay.finished:  # play again from the start
                 self.command({'cmd': 'seek', 'time': replay.start})
             replay.set_playing(cmd == 'play')
+        elif cmd == 'folder':
+            self.folder = bool(command.get('on'))
         elif replay is not None and cmd == 'speed':
             replay.set_speed(max(0.0, float(command['speed'])))
         self.out_queue.put(self.status())
@@ -460,7 +493,8 @@ def run(settings, in_queue, settings_queue, control_queue, out_queue, update_int
         replay = source.replay
         if replay is not None and replay.playing:
             if replay.finished:
-                replay.set_playing(False)
+                if not (source.folder and source.play_next()):
+                    replay.set_playing(False)
             else:
                 now = time.monotonic()
                 due = replay.due(now)

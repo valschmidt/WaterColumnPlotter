@@ -193,6 +193,17 @@ function combineImage(im, kx, ky, how) {
 // ---------------------------------------------------------------------------
 // Panel: one plot. World coordinates have y increasing downward on screen.
 // ---------------------------------------------------------------------------
+// Keys held for zooming one axis with the wheel: 'h' (horizontal only) or 'v' (vertical only). Typing in a field
+// doesn't count, and leaving the window forgets them (a key released elsewhere sends no keyup here).
+const zoomAxisKeys = new Set();
+const isTyping = ev => ev.target instanceof HTMLElement && ev.target.matches('input, select, textarea');
+window.addEventListener('keydown', ev => {
+  const k = ev.key.toLowerCase();
+  if ((k === 'h' || k === 'v') && !isTyping(ev) && !ev.ctrlKey && !ev.metaKey && !ev.altKey) zoomAxisKeys.add(k);
+});
+window.addEventListener('keyup', ev => zoomAxisKeys.delete(ev.key.toLowerCase()));
+window.addEventListener('blur', () => zoomAxisKeys.clear());
+
 class Panel {
   constructor(id, opts) {
     this.el = document.getElementById(id);
@@ -397,12 +408,15 @@ class Panel {
       ev.preventDefault();
       if (this.inHist(ev.offsetX, ev.offsetY)) return;
       this.setAutoZoom(false);
+      // Holding H zooms horizontally only, V vertically only (both held: both axes, as with neither).
       const f = Math.exp(ev.deltaY * 0.0015);
+      const h = zoomAxisKeys.has('h'), vert = zoomAxisKeys.has('v');
+      const fx = vert && !h ? 1 : f, fy = h && !vert ? 1 : f;
       const [cx, cy] = this.toWorld(ev.offsetX, ev.offsetY);
       const v = this.view;
       this.view = {
-        x0: cx + (v.x0 - cx) * f, x1: cx + (v.x1 - cx) * f,
-        y0: cy + (v.y0 - cy) * f, y1: cy + (v.y1 - cy) * f,
+        x0: cx + (v.x0 - cx) * fx, x1: cx + (v.x1 - cx) * fx,
+        y0: cy + (v.y0 - cy) * fy, y1: cy + (v.y1 - cy) * fy,
       };
       this.draw();
     }, { passive: false });
@@ -1476,6 +1490,7 @@ const sourceEl = {
   browse: document.getElementById('replay-browse'), file: document.getElementById('replay-file'),
   play: document.getElementById('replay-play'), speed: document.getElementById('replay-speed'),
   position: document.getElementById('replay-position'), time: document.getElementById('replay-time'),
+  folder: document.getElementById('replay-folder'),
 };
 const realtimeConfig = document.getElementById('realtime-config');
 const realtimeConfigToggle = document.getElementById('realtime-config-toggle');
@@ -1504,7 +1519,8 @@ function showSource() {
   showOpening();
 
   sourceEl.file.hidden = !r;
-  for (const el of [sourceEl.play, sourceEl.speed, sourceEl.position]) el.disabled = !r;
+  for (const el of [sourceEl.play, sourceEl.speed, sourceEl.position, sourceEl.folder]) el.disabled = !r;
+  sourceEl.folder.checked = source.folder !== false;
   if (r) {
     sourceEl.play.textContent = r.playing ? '❚❚ Pause' : (r.finished ? '▶ Play again' : '▶ Play');
     sourceEl.speed.value = String(r.speed);
@@ -1575,6 +1591,7 @@ sourceEl.file.addEventListener('change', () => {
 });
 sourceEl.play.addEventListener('click', () => sourceCommand(source.replay && source.replay.playing ? 'pause' : 'play'));
 sourceEl.speed.addEventListener('change', () => sourceCommand('speed', { speed: Number(sourceEl.speed.value) }));
+sourceEl.folder.addEventListener('change', () => sourceCommand('folder', { on: sourceEl.folder.checked }));
 sourceEl.position.addEventListener('input', () => { seeking = true; showSource(); });
 sourceEl.position.addEventListener('change', () => {
   seeking = false;
