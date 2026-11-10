@@ -2,7 +2,11 @@
 
 # Water Column Plotter
 
-Real-time display of multibeam sonar water column data, in a web browser.
+Real-time display of multibeam sonar water column data, in a web browser. 
+
+Developed by Val Schmidt and John Hughes Clarke at the Center for Coastal and Ocean Mapping/Joint Hydrographic Center of the University of New Hampshire. (See Acknowledgements below for *many* other contributions incorporated into this effort.)
+
+![Water Column Plotter replaying a recording: pie, horizontal slice and vertical slice with thermocline tracking](docs/images/screenshot.png)
 
 Water Column Plotter receives water column datagrams from a multibeam echosounder as they're recorded, or replays a
 recorded file, and shows them in three linked views:
@@ -31,8 +35,6 @@ It can also:
 **Only Kongsberg water column data is supported for now**: the `#MWC` water column datagrams of Kongsberg's
 `.kmall` format (EM 2040, EM 712, EM 304 and other systems run by SIS or K-Controller), received over UDP or read from
 `.kmall` / `.kmwcd` files. The sound speed profile (`#SVP`) and installation (`#IIP`) datagrams are used too.
-
-![Water Column Plotter replaying a recording: pie, horizontal slice and vertical slice with thermocline tracking](docs/images/screenshot.png)
 
 ## Installation
 
