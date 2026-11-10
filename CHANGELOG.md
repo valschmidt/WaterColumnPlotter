@@ -35,12 +35,35 @@ On the `wreck-detect` branch, being tried out.
   same name in the same folder, the one above or one beside it), each detection also gets a latitude, longitude and
   depth below the waterline, corrected from the sonar's bottom detections on the same beam, with an uncertainty.
   These are field estimates: no tide, datum or separation model, and real-time navigation.
+- Wreck detection also works when replaying Teledyne RESON `.s7k` files, with the comparison against the sonar's
+  bottom detections, but without coordinates (they need Kongsberg #MRZ soundings).
 
 ### Changed
 - The horizontal slice's depth band is now amber (was magenta), so the pink wreck detections stand out.
 - The position shown above each plot is shorter (for example "-1234 swaths, 07:17:37 UTC, depth: 12.3 m, -45.6 dB"),
   and stays shown when the mouse is over something that can be dragged or a wreck detection, with a short note about
   it after a "·".
+
+## 2026-11-10
+
+### Added
+- **Replay Teledyne RESON `.s7k` recordings.** Choose an `.s7k` file in the Open dialog, or start with
+  `wcp --replay FILE.s7k`, and its water column (7018 beamformed records) is plotted like Kongsberg data, with the
+  sonar's bottom detections, heave and the sidelobe suppression options. Checked with a SeaBat T51R. Live 7k data
+  isn't received yet. These files carry no installation record or sound speed profile the plotter reads: for depths
+  from the water surface, enter the transducer depth in Settings, and the thermocline comparison with a cast isn't
+  available. Installing now also installs pys7k, which reads the files.
+
+### Fixed
+- **Recordings without bottom detections now display.** Swaths in which no beam detected the bottom (in water deeper
+  than the water column range, for instance) were all dropped, so the plots stayed at "Waiting for data…" while the
+  status line showed pings arriving. They are now shown over their whole recorded range.
+
+### Changed
+- **Clearer count of skipped pings (for troubleshooting).** The worker's internal `no_bottom` count, which no longer
+  had anything to do with bottom detections, is split in two: `empty_ping` (pings with no water column samples) and
+  `no_background` (with "ping mean" sidelobe suppression, each receive fan's first ping, which has nothing to subtract
+  yet). Neither is shown on the page.
 
 ## 2026-11-09
 

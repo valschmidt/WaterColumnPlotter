@@ -27,7 +27,7 @@ It can also:
   by subtracting medians per transmit sector, range and beam medians, or each beam's mean over recent pings.
 - **Track scattering layers or the thermocline** in the vertical slice, and alert when the sound speed profile in use
   no longer matches the thermocline the sonar sees: a sign that a new cast is needed.
-- **Replay recorded files** (`.kmall` / `.kmwcd`), with play/pause, speed (0.5x to 10x, or as fast as possible) and
+- **Replay recorded files** (`.kmall` / `.kmwcd`, and Teledyne RESON `.s7k`), with play/pause, speed (0.5x to 10x, or as fast as possible) and
   seeking.
 - **Be viewed from several computers at once.** One copy runs alongside the sonar and any browser on the network can
   view it.
@@ -35,6 +35,11 @@ It can also:
 **Only Kongsberg water column data is supported for now**: the `#MWC` water column datagrams of Kongsberg's
 `.kmall` format (EM 2040, EM 712, EM 304 and other systems run by SIS or K-Controller), received over UDP or read from
 `.kmall` / `.kmwcd` files. The sound speed profile (`#SVP`) and installation (`#IIP`) datagrams are used too.
+
+**Teledyne RESON `.s7k` recordings can be replayed** (not yet received live): the 7018 beamformed water column, with
+each ping's 7000 settings, 7004 beam geometry and 7027 bottom detections, and heave from 1012. Checked with a
+SeaBat T51R. They have no installation record the plotter reads, so for depths from the water surface enter the
+transducer depth in Settings, and no sound speed profile, so there is no thermocline comparison.
 
 ## Installation
 
@@ -83,25 +88,54 @@ Open a new terminal window, and `wcp` starts the plotter.
 
 ### Windows
 
-Install Python 3.10 or later from [python.org](https://www.python.org/downloads/) (check "Add python.exe to PATH" in
-the installer) and [Git for Windows](https://git-scm.com/download/win). Then, in PowerShell:
+You don't need Python or git for this. Open PowerShell (press the Start key, type `PowerShell`, press Enter) and run:
+
+```powershell
+irm https://raw.githubusercontent.com/valschmidt/WaterColumnPlotter/master/install.ps1 | iex
+```
+
+This runs [install.ps1](install.ps1), which installs [uv](https://docs.astral.sh/uv/) (a Python package manager) if
+you don't have it, and uses it to install Water Column Plotter with its own copy of Python. Everything is installed for
+your user account only, so you don't need administrator rights. It also adds **Water Column Plotter** to the Start menu.
+
+Start the plotter from the Start menu, or by typing `wcp` in a **new** PowerShell window. It runs in a console
+window; close that window (or press Ctrl-C in it) to stop it.
+
+The first time the plotter listens for sonar data, Windows may ask whether to allow it through the firewall. Allow it
+on the network the sonar is on (usually **Private** or **Domain**), or the plotter won't receive real-time data.
+Replaying recordings works either way.
+
+**Updating:** run the same `irm ... | iex` command again.
+
+**Uninstalling:** in PowerShell, run
+
+```powershell
+uv tool uninstall watercolumnplotter
+Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Water Column Plotter.lnk"
+```
+
+**For developers:** to work on the code, install [Git for Windows](https://git-scm.com/download/win) and
+[uv](https://docs.astral.sh/uv/) (`winget install --id Git.Git -e` and `winget install --id astral-sh.uv -e`), then:
 
 ```powershell
 git clone https://github.com/valschmidt/WaterColumnPlotter.git $HOME\WaterColumnPlotter
 cd $HOME\WaterColumnPlotter
-py -m venv .venv
-.venv\Scripts\python -m pip install --upgrade pip
-.venv\Scripts\python -m pip install -e .
+uv venv --python 3.12
+uv pip install -e .
 ```
 
-Start the plotter with `$HOME\WaterColumnPlotter\.venv\Scripts\wcp`.
+and start it with `uv run wcp` from that folder. Or run `uv tool install -e $HOME\WaterColumnPlotter`, then
+`uv tool update-shell`, so `wcp` runs your working copy from any directory. To try changes to the installer, run
+`powershell -ExecutionPolicy Bypass -File .\install.ps1 -Source .` from that folder.
 
 ### Updating
+
+On Linux and macOS (on Windows, see above):
 
 ```bash
 cd ~/WaterColumnPlotter
 git pull
-.venv/bin/python -m pip install -e .     # Windows: .venv\Scripts\python -m pip install -e .
+.venv/bin/python -m pip install -e .
 ```
 
 The last step is needed only when the packages Water Column Plotter uses change, but it's quick and harmless when
@@ -124,7 +158,7 @@ wcp --udp-port 6020
 wcp --multicast 225.255.255.255 --udp-ip 192.168.1.20   # join a multicast group on this interface
 ```
 
-**Replaying a recording.** Click **Replay** in the Source bar and choose a `.kmall` or `.kmwcd` file in the Open dialog,
+**Replaying a recording.** Click **Replay** in the Source bar and choose a `.kmall`, `.kmwcd` or `.s7k` file in the Open dialog,
 or name one when starting:
 
 ```bash
@@ -177,7 +211,8 @@ version is replacing. To install it as well, use `pip install -e ".[gui]"` in pl
 - **Roland Arsenault**: the scattering layer tracking follows the approach of his
   [watercolumn_layer_tracker](https://github.com/rolker/watercolumn_layer_tracker).
 
-Kongsberg datagrams are read with [pykmall](https://pypi.org/project/pykmall/). Val Schmidt maintains Water Column
+Kongsberg datagrams are read with [pykmall](https://pypi.org/project/pykmall/), and Teledyne RESON `.s7k` files
+with [pys7k](https://pypi.org/project/pys7k/). Val Schmidt maintains Water Column
 Plotter and wrote the browser version, with Claude (Anthropic) as an AI coding assistant.
 
 ## Copyright and license
