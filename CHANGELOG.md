@@ -13,6 +13,12 @@ prototype, so changes are listed by date rather than version number.
   than the water column range, for instance) were all dropped, so the plots stayed at "Waiting for data…" while the
   status line showed pings arriving. They are now shown over their whole recorded range.
 
+### Changed
+- **Clearer count of skipped pings (for troubleshooting).** The worker's internal `no_bottom` count, which no longer
+  had anything to do with bottom detections, is split in two: `empty_ping` (pings with no water column samples) and
+  `no_background` (with "ping mean" sidelobe suppression, each receive fan's first ping, which has nothing to subtract
+  yet). Neither is shown on the page.
+
 ## 2026-11-09
 
 ### Added

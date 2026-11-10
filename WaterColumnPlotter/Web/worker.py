@@ -22,7 +22,7 @@ import time
 import numpy as np
 from KMALL.kmall import kmall
 
-from WaterColumnPlotter.Web.gridding import GridTooLarge, PingBackground, add_blocks, average, grid_mwc, vertical_band
+from WaterColumnPlotter.Web.gridding import EmptyPing, GridTooLarge, NoBackground, PingBackground, add_blocks, average, grid_mwc, vertical_band
 from WaterColumnPlotter.Web.layers import LayerTracker
 from WaterColumnPlotter.Web.replay import Replay
 from WaterColumnPlotter.Web.thermocline import ThermoclineTracker, depth_error, svp_thermocline
@@ -92,7 +92,7 @@ class Worker:
         self.settings = dict(settings)
         self.km = kmall()
         self.svp = None  # latest cast: {'depth', 'speed', 'top', 'bottom'} (depths below the surface)
-        self.stats = {'processed': 0, 'no_bottom': 0, 'grid_too_large': 0, 'swath_skipped': 0, 'process_ms': 0.0,
+        self.stats = {'processed': 0, 'empty_ping': 0, 'no_background': 0, 'grid_too_large': 0, 'swath_skipped': 0, 'process_ms': 0.0,
                       'ping_rate_hz': None, 'swaths_per_ping': None}
         self.ping_times = collections.deque(maxlen=PING_RATE_PINGS)  # (pingCnt, time) of recent ping cycles
         self.reset()
@@ -253,14 +253,17 @@ class Worker:
             return
         depth_offset = (s['transducerDepth_m'] or 0.0) if s['referenceToSurface'] else 0.0
         try:
-            result = grid_mwc(dg, s['binSize_m'], depth_offset, s['sidelobeSuppression'], self.background)
+            sums, counts, row0, col0, bottom = grid_mwc(dg, s['binSize_m'], depth_offset, s['sidelobeSuppression'],
+                                                        self.background)
+        except EmptyPing:
+            self.stats['empty_ping'] += 1
+            return
+        except NoBackground:
+            self.stats['no_background'] += 1
+            return
         except GridTooLarge:
             self.stats['grid_too_large'] += 1
             return
-        if result is None:
-            self.stats['no_bottom'] += 1
-            return
-        sums, counts, row0, col0, bottom = result
         # The seafloor under the tracking column: the shallowest bottom detection in its across-track band.
         b = s['binSize_m']
         in_band = (bottom[0] >= self.v_band[0] * b) & (bottom[0] < self.v_band[1] * b)

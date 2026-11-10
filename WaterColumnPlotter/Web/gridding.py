@@ -27,6 +27,14 @@ class GridTooLarge(Exception):
     pass
 
 
+class EmptyPing(Exception):
+    """The ping has no samples to grid."""
+
+
+class NoBackground(Exception):
+    """With 'ping_mean', no sample has a background yet (each receive fan's first ping)."""
+
+
 # Sidelobe suppression choices: the median options use Kongsberg's transmit sectors and are in kongsberg.py.
 # 'ping_mean' subtracts, from each beam's sample at each range, that beam's mean at that range over the previous
 # swaths (see PingBackground): whatever stays put from swath to swath.
@@ -89,8 +97,9 @@ def grid_mwc(dg, bin_size, depth_offset=0.0, sidelobe_suppression='off', backgro
     then dB relative to them); or 'ping_mean', which subtracts each beam's mean over the previous swaths, from background (a PingBackground), which this ping is then added to.
     :return: (sums, counts, row0, col0, bottom): 2D arrays of summed amplitude (dB) and sample count per cell, the
     row and column index of their first cell, and the bottom detections as (across-track, depth) arrays (m) for the
-    beams that have one (empty if none has). Returns None if the ping has no samples, or with 'ping_mean', for the
-    first ping.
+    beams that have one (empty if none has).
+    :raises EmptyPing: if the ping has no samples.
+    :raises NoBackground: with 'ping_mean', if no sample has a background yet.
     :raises GridTooLarge: if the block would exceed MAX_CELLS cells.
     """
     beam = dg['beamData']
@@ -113,7 +122,7 @@ def grid_mwc(dg, bin_size, depth_offset=0.0, sidelobe_suppression='off', backgro
     n_use = np.clip(np.minimum(num_samples, det - start + 1), 0, None)
     total = int(n_use.sum())
     if total == 0:
-        return None
+        raise EmptyPing
 
     amplitudes = np.fromiter(itertools.chain.from_iterable(s[:k] for s, k in zip(beam['sampleAmplitude05dB_p'], n_use)),
                              dtype=np.float32, count=total)
@@ -132,7 +141,7 @@ def grid_mwc(dg, bin_size, depth_offset=0.0, sidelobe_suppression='off', backgro
         key = (dg['cmnPart']['rxTransducerInd'], dg['cmnPart']['rxFanIndex'])
         amplitudes, has_background = background.subtract(key, beam_index, sample_number, amplitudes)
         if not has_background.any():
-            return None
+            raise NoBackground
         beam_index, sample_number = beam_index[has_background], sample_number[has_background]
 
     rx = dg['rxInfo']
