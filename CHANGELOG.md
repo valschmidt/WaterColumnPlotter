@@ -8,7 +8,10 @@ prototype, so changes are listed by date rather than version number.
 
 ## Unreleased
 
-Nothing yet.
+### Fixed
+- **Recordings without bottom detections now display.** Swaths in which no beam detected the bottom (in water deeper
+  than the water column range, for instance) were all dropped, so the plots stayed at "Waiting for data…" while the
+  status line showed pings arriving. They are now shown over their whole recorded range.
 
 ## 2026-11-09
 
