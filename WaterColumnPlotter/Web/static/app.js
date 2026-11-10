@@ -44,7 +44,7 @@ let LUT = LUTS.viridis;
 const SLICE_H_COLOR = 'rgba(255, 170, 60, 0.9)';   // horizontal slice band (depth)
 const SLICE_V_COLOR = 'rgba(80, 220, 255, 0.9)';   // vertical slice band (across-track)
 const WRECK_DOT = '#ff3fd0';                         // wreck detections
-const WRECK_BOX = 'rgb(210, 175, 255)';      // the wreck box (prism): violet, apart from the white pie time line
+const WRECK_BOX = 'rgb(160, 110, 240)';      // the wreck box (prism): violet, apart from the white pie time line
 const BOTTOM_DOT = 'rgba(200, 205, 215, 0.75)';     // the sonar's bottom detections under the wreck box
 
 // ---------------------------------------------------------------------------
