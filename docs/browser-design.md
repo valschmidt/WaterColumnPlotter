@@ -64,6 +64,8 @@ Gridding follows the Qt version's geometry, with two bugs fixed.
     largest positive angle), and port is drawn on the left.
   - `z = r * cos(tiltAngleReTx) * cos(beamPointAngReVertical) + heave`
   - Samples beyond each beam's bottom detect are dropped. Beams with no bottom detect use the swath's mean detect.
+    A swath in which no beam has a bottom detect (the seafloor beyond the water column range, or detection failed)
+    uses every recorded sample, rather than being dropped.
   - Heave: `heave_m` is added to every sample's depth, as in the Qt version. (Checked on a REV I file: adding it
     reduces ping-to-ping jitter of the nadir seafloor from 3.0 to 1.9 cm; subtracting it raises it to 5.1 cm.)
   - Depth reference: by default depth is measured from the transducer's resting (heave-corrected) depth. With

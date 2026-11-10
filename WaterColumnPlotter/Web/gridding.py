@@ -89,19 +89,26 @@ def grid_mwc(dg, bin_size, depth_offset=0.0, sidelobe_suppression='off', backgro
     then dB relative to them); or 'ping_mean', which subtracts each beam's mean over the previous swaths, from background (a PingBackground), which this ping is then added to.
     :return: (sums, counts, row0, col0, bottom): 2D arrays of summed amplitude (dB) and sample count per cell, the
     row and column index of their first cell, and the bottom detections as (across-track, depth) arrays (m) for the
-    beams that have one. Returns None if the ping has no bottom detections, or with 'ping_mean', for the first ping.
+    beams that have one (empty if none has). Returns None if the ping has no samples, or with 'ping_mean', for the
+    first ping.
     :raises GridTooLarge: if the block would exceed MAX_CELLS cells.
     """
     beam = dg['beamData']
     det = np.asarray(beam['detectedRangeInSamples'], dtype=np.int64)
-    if not det.any():
-        return None
     detected = det > 0
-    # Beams without a bottom detection use the swath's mean detection range.
-    det[det == 0] = int(det[det > 0].mean())
-
     start = np.asarray(beam['startRangeSampleNum'], dtype=np.int64)
     num_samples = np.asarray(beam['numSampleData'], dtype=np.int64)
+    if detected.any():
+        # Beams without a bottom detection use the swath's mean detection range.
+        det[~detected] = int(det[detected].mean())
+        min_slant_range = int(det.min())
+    else:
+        # No beam has a bottom detection: the seafloor is beyond the recorded range (deep water, or a short water
+        # column range), or detection failed. Use every recorded sample, with no sidelobe region beyond a minimum
+        # slant range, rather than dropping the ping.
+        det = start + num_samples - 1
+        min_slant_range = int(det.max()) + 1
+
     # Use samples up to and including the bottom detection, and only samples that exist.
     n_use = np.clip(np.minimum(num_samples, det - start + 1), 0, None)
     total = int(n_use.sum())
@@ -119,7 +126,7 @@ def grid_mwc(dg, bin_size, depth_offset=0.0, sidelobe_suppression='off', backgro
 
     if sidelobe_suppression in kongsberg.OPTIONS:
         amplitudes = kongsberg.suppress_sidelobes(dg, sidelobe_suppression, amplitudes, beam_index, sample_number,
-                                                  int(det.min()))
+                                                  min_slant_range)
     elif sidelobe_suppression == 'ping_mean':
         # Samples with no history yet are left out, rather than shown on a different (absolute dB) scale.
         key = (dg['cmnPart']['rxTransducerInd'], dg['cmnPart']['rxFanIndex'])
