@@ -27,7 +27,7 @@
 
   <dialog id="browser" aria-labelledby="browser-title">
     <h2 id="browser-title">Choose a recording to replay</h2>
-    <p class="about-sub">Files on the plotter's computer. Choose a .kmall or .kmwcd file to play it.</p>
+    <p class="about-sub">Files on the plotter's computer. Choose a .kmall, .kmwcd or .s7k file to play it.</p>
     <div class="browser-path">
       <button id="browser-up" type="button" title="Parent directory" aria-label="Parent directory">↑</button>
       <input id="browser-dir" type="text" aria-label="Directory" autocomplete="off" spellcheck="false" title="Type a directory and press Enter to go there.">
@@ -59,7 +59,7 @@
         (University of New Hampshire, 2018).</li>
       <li><strong>Claude</strong> (Anthropic): AI coding assistant, contributor to the browser version.</li>
     </ul>
-    <p class="about-sub">Kongsberg datagrams are read with <a href="https://pypi.org/project/pykmall/" target="_blank" rel="noopener">pykmall</a>.</p>
+    <p class="about-sub">Kongsberg datagrams are read with <a href="https://pypi.org/project/pykmall/" target="_blank" rel="noopener">pykmall</a>, and Teledyne RESON .s7k files with <a href="https://github.com/valschmidt/pys7k" target="_blank" rel="noopener">pys7k</a>.</p>
     <form method="dialog"><button type="submit" autofocus>Close</button></form>
   </dialog>
 
@@ -67,7 +67,7 @@
     <span class="source-label">Source:</span>
     <span class="segmented" role="group" aria-label="Data source: real-time or replay" title="Choose one: where the data comes from.">
       <button type="button" data-mode="realtime" aria-pressed="true" title="Plot datagrams from the sonar (or SIS / K-Controller) as they arrive over UDP.">Real-time</button>
-      <button type="button" data-mode="replay" aria-pressed="false" title="Plot a recorded .kmall / .kmwcd file, chosen in an Open dialog. Real-time data is ignored while replaying.">Replay</button>
+      <button type="button" data-mode="replay" aria-pressed="false" title="Plot a recorded .kmall / .kmwcd / .s7k file, chosen in an Open dialog. Real-time data is ignored while replaying.">Replay</button>
     </span>
 
     <span id="realtime-controls" class="mode-controls">

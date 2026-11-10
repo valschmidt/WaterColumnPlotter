@@ -384,7 +384,7 @@ class Server:
             # A recorded file anywhere on the plotter's computer; its directory becomes the replay directory.
             path = Path(str(msg.get('path', ''))).expanduser().resolve()
             if not (path.suffix.lower() in replay.EXTENSIONS and path.is_file()):
-                await self.source_error(f"Not a recorded .kmall / .kmwcd file: {msg.get('path')}")
+                await self.source_error(f"Not a recorded {' / '.join(replay.EXTENSIONS)} file: {msg.get('path')}")
                 return
             self.source_config['dataDir'] = str(path.parent)
             self.control_queue.put({'cmd': 'open', 'path': str(path)})
@@ -495,7 +495,7 @@ def main():
     parser.add_argument('--update-interval', type=float, default=1.0, help="Seconds between display updates.")
     parser.add_argument('--no-browser', action='store_true', help="Don't open a browser window.")
     parser.add_argument('--data-dir', default=None,
-                        help="Directory where browsing for recorded .kmall/.kmwcd files to replay starts (default: "
+                        help="Directory where browsing for recorded .kmall/.kmwcd/.s7k files to replay starts (default: "
                              "the --replay file's directory, or the current directory).")
     parser.add_argument('--replay', default=None, metavar='FILE', help="Replay this recorded file at start-up.")
     args = parser.parse_args()

@@ -18,7 +18,7 @@ One command (`wcp`) starts one Python program, which opens the default browser a
 Sonar / SIS / KmallPlayer --UDP--> receiver process: socket reads, partition reassembly
                                         |  multiprocessing.Queue (complete datagrams)
                                         v
-recorded .kmall/.kmwcd file ------> worker process: pykmall parse -> grid -> pie and slice columns
+recorded .kmall/.kmwcd/.s7k file -> worker process: pykmall / pys7k parse -> grid -> pie and slice columns
   (replay, read by the worker)          |  multiprocessing.Queue (results)      ^ settings, source commands
                                         v                                       |
                                    main process: aiohttp web server -----------+
@@ -83,6 +83,26 @@ Gridding follows the Qt version's geometry, with two bugs fixed.
     visible. Referenced to the water surface, they start at 0 m.
   - Safeguard: a ping whose block would exceed 2 million cells (a cell size far too small for the swath) is skipped,
     and the page's status line says so.
+- **Teledyne RESON 7k (replay of .s7k files; `gridding.grid_7018`, `replay_s7k.py`)**: the same gridding, from each
+  ping's 7018 beamformed water column (samples x beams magnitudes, every beam from sample 0 at transmit) with that
+  ping's 7000 (sample rate, sound speed, projector vertical steering as the tilt), the 7004 beam geometry and the
+  7027 bottom detections (beams with a magnitude or phase detection; `DetectionPoint` scaled from the 7027 sample
+  rate to the 7000 one). Records arrive in the order 7000, 7004, 7027, 7018 within a ping, so the worker keeps the
+  latest of each and grids when the 7018 arrives; a seek starts at a ping's 7000. Checked on SeaBat T51R data
+  (775 kHz, 512 beams, 2979 samples to 64 m, 11.2 pings/s; 152 files, 2026-11-09):
+  - Amplitude: `20 log10(magnitude)` dB, uncalibrated (magnitude 0 is taken as 1). The color scale sets itself, so
+    the offset from Kongsberg's levels doesn't matter.
+  - `y = r * sin(BeamHorizontalDirection)`: 7k steering angles are positive to starboard (as the DFD defines every
+    steering angle; 7027 `RxAngle`, in the array frame, is the 7004 angle plus roll, which fits only that sign).
+  - Roll is not applied: the T51R steers its receive beams for roll (7012 Flags bit 1; 7027 `AppliedRoll` is 0, which
+    the DFD says means roll stabilization is on). Over 1970 pings, the across-track slope of the seafloor fitted to
+    the 7027 detections is uncorrelated with roll (r = +0.04) as the 7004 angles stand, and follows it at about 1
+    degree per degree when roll is added or subtracted. A sonar without roll stabilization would need roll here.
+  - Heave: 1012 heave (positive up) is subtracted, from the latest 1012 before the ping (1012 arrives at about 100 Hz).
+    Subtracting reduces ping-to-ping change of the nadir seafloor from 2.0 to 1.6 cm; adding raises it to 2.6 cm.
+  - The median sidelobe options take the whole swath as one transmit sector; `ping_mean` works as for Kongsberg.
+  - Bottom detections in the grid sit on the strongest echo: in raw 7018 data, the strongest sample in 92 to 94% of
+    beams is within 10 samples of the 7027 detection (median offset -0.2 samples).
 - Status line: the sonar's ping rate and swaths per ping, measured from the datagram timestamps over the last 20 ping
   cycles (so a replay shows the recorded rate at any speed), then datagrams received (or processed, when replaying)
   per second, and processing time per datagram. A ping cycle sends one datagram per swath per receive head, so dual-swath

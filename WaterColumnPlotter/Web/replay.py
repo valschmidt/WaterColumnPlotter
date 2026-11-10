@@ -14,7 +14,7 @@ from KMALL.kmall import kmall
 
 # Message types as pykmall's index names them.
 MWC, SVP, IIP = "b'#MWC'", "b'#SVP'", "b'#IIP'"
-EXTENSIONS = ('.kmall', '.kmwcd')
+EXTENSIONS = ('.kmall', '.kmwcd', '.s7k')  # .s7k: replay_s7k.py
 MAX_GAP_S = 5.0  # pauses in recording longer than this are skipped
 MAX_LAG_S = 1.0  # when processing falls further behind than this, playback slows to keep up instead of rushing
 

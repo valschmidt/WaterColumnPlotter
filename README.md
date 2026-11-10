@@ -23,7 +23,7 @@ It can also:
   by subtracting medians per transmit sector, range and beam medians, or each beam's mean over recent pings.
 - **Track scattering layers or the thermocline** in the vertical slice, and alert when the sound speed profile in use
   no longer matches the thermocline the sonar sees: a sign that a new cast is needed.
-- **Replay recorded files** (`.kmall` / `.kmwcd`), with play/pause, speed (0.5x to 10x, or as fast as possible) and
+- **Replay recorded files** (`.kmall` / `.kmwcd`, and Teledyne RESON `.s7k`), with play/pause, speed (0.5x to 10x, or as fast as possible) and
   seeking.
 - **Be viewed from several computers at once.** One copy runs alongside the sonar and any browser on the network can
   view it.
@@ -31,6 +31,11 @@ It can also:
 **Only Kongsberg water column data is supported for now**: the `#MWC` water column datagrams of Kongsberg's
 `.kmall` format (EM 2040, EM 712, EM 304 and other systems run by SIS or K-Controller), received over UDP or read from
 `.kmall` / `.kmwcd` files. The sound speed profile (`#SVP`) and installation (`#IIP`) datagrams are used too.
+
+**Teledyne RESON `.s7k` recordings can be replayed** (not yet received live): the 7018 beamformed water column, with
+each ping's 7000 settings, 7004 beam geometry and 7027 bottom detections, and heave from 1012. Checked with a
+SeaBat T51R. They have no installation record the plotter reads, so for depths from the water surface enter the
+transducer depth in Settings, and no sound speed profile, so there is no thermocline comparison.
 
 ![Water Column Plotter replaying a recording: pie, horizontal slice and vertical slice with thermocline tracking](docs/images/screenshot.png)
 
@@ -151,7 +156,7 @@ wcp --udp-port 6020
 wcp --multicast 225.255.255.255 --udp-ip 192.168.1.20   # join a multicast group on this interface
 ```
 
-**Replaying a recording.** Click **Replay** in the Source bar and choose a `.kmall` or `.kmwcd` file in the Open dialog,
+**Replaying a recording.** Click **Replay** in the Source bar and choose a `.kmall`, `.kmwcd` or `.s7k` file in the Open dialog,
 or name one when starting:
 
 ```bash
@@ -198,7 +203,8 @@ version is replacing. To install it as well, use `pip install -e ".[gui]"` in pl
 - **Roland Arsenault**: the scattering layer tracking follows the approach of his
   [watercolumn_layer_tracker](https://github.com/rolker/watercolumn_layer_tracker).
 
-Kongsberg datagrams are read with [pykmall](https://pypi.org/project/pykmall/). Val Schmidt maintains Water Column
+Kongsberg datagrams are read with [pykmall](https://pypi.org/project/pykmall/), and Teledyne RESON `.s7k` files
+with [pys7k](https://github.com/valschmidt/pys7k). Val Schmidt maintains Water Column
 Plotter and wrote the browser version, with Claude (Anthropic) as an AI coding assistant.
 
 ## Copyright and license

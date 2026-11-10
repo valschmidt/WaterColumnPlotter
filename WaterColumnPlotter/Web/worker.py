@@ -1,5 +1,6 @@
 """
-Worker: parses complete #MWC datagrams with pykmall and grids them. Each completed swath (its datagrams summed: one
+Worker: parses complete #MWC datagrams with pykmall, or Teledyne RESON 7k records with pys7k (process_7k), and grids
+them. Each completed swath (its datagrams summed: one
 per receive head on dual-head systems) is sent to the pages as a compact grid (encode_swath), and pages build the pie
 and both slices from the swaths they hold, so they can move the slices and step through time without the worker.
 The worker also averages a vertical column under the vessel (Settings: across-track width) over each group of
@@ -21,10 +22,13 @@ import time
 
 import numpy as np
 from KMALL.kmall import kmall
+from PYS7K.frame import time7k_to_epoch
+from PYS7K.registry import decode_record
 
-from WaterColumnPlotter.Web.gridding import EmptyPing, GridTooLarge, NoBackground, PingBackground, add_blocks, average, grid_mwc, vertical_band
+from WaterColumnPlotter.Web.gridding import EmptyPing, GridTooLarge, NoBackground, PingBackground, add_blocks, average, grid_7018, grid_mwc, vertical_band
 from WaterColumnPlotter.Web.layers import LayerTracker
 from WaterColumnPlotter.Web.replay import Replay
+from WaterColumnPlotter.Web.replay_s7k import S7kReplay
 from WaterColumnPlotter.Web.thermocline import ThermoclineTracker, depth_error, svp_thermocline
 
 logger = logging.getLogger(__name__)
@@ -41,6 +45,7 @@ CALIBRATION_PICKS = 10
 # A swath is complete when the next one starts; if no datagram has arrived for this long, it is taken as complete.
 SWATH_IDLE_S = 0.5
 NO_DATA = 255  # encoded cell with no data
+S7K_SYNC = b'\xff\xff\x00\x00'  # bytes 4-8 of every 7k record (its sync pattern); Kongsberg has the datagram type there
 
 RESET_SETTINGS = ('binSize_m', 'alongTrackAvg_swath', 'referenceToSurface', 'transducerDepth_m', 'sidelobeSuppression',
                   'dualSwath')
@@ -91,18 +96,18 @@ class Worker:
     def __init__(self, settings):
         self.settings = dict(settings)
         self.km = kmall()
+        self.s7k = {}  # 7k: the latest 7000, 7004 and 7027 records, by record type, and 'heave' (m, from 1012)
         self.svp = None  # latest cast: {'depth', 'speed', 'top', 'bottom'} (depths below the surface)
         self.stats = {'processed': 0, 'empty_ping': 0, 'no_background': 0, 'grid_too_large': 0, 'swath_skipped': 0, 'process_ms': 0.0,
                       'ping_rate_hz': None, 'swaths_per_ping': None}
         self.ping_times = collections.deque(maxlen=PING_RATE_PINGS)  # (pingCnt, time) of recent ping cycles
         self.reset()
 
-    def note_ping(self, dg):
+    def note_ping(self, ping, t, swaths_per_ping):
         """
         Track the sonar's ping rate from the data's timestamps (the recorded rate when replaying, whatever the speed).
-        Each ping cycle (pingCnt) counts once, however many swaths and receive heads it has.
+        Each ping cycle (ping number) counts once, however many swaths and receive heads it has.
         """
-        ping, t = dg['cmnPart']['pingCnt'], dg['header']['dgtime']
         last = self.ping_times[-1] if self.ping_times else None
         if last and last[0] == ping:
             return
@@ -111,7 +116,7 @@ class Worker:
         self.ping_times.append((ping, t))
         span = self.ping_times[-1][1] - self.ping_times[0][1]
         self.stats['ping_rate_hz'] = (len(self.ping_times) - 1) / span if span > 0 else None
-        self.stats['swaths_per_ping'] = dg['cmnPart']['swathsPerPing']
+        self.stats['swaths_per_ping'] = swaths_per_ping
 
     def reset(self):
         s = self.settings
@@ -244,7 +249,7 @@ class Worker:
         self.last_datagram = time.monotonic()
         self.km.OpenBytestoRead(data)
         dg = self.km.read_EMdgmMWC()
-        self.note_ping(dg)
+        self.note_ping(dg['cmnPart']['pingCnt'], dg['header']['dgtime'], dg['cmnPart']['swathsPerPing'])
         s = self.settings
         position = DUAL_SWATH[s['dualSwath']]
         cmn = dg['cmnPart']
@@ -281,6 +286,57 @@ class Worker:
         self.stats['processed'] += 1
         self.stats['process_ms'] = 0.9 * self.stats['process_ms'] + 0.1 * 1e3 * (time.perf_counter() - t0)
 
+    def process_7k(self, data):
+        """
+        A 7k record (bytes). Each ping's 7000, 7004 and 7027 come before its 7018, which is gridded with them; 1012
+        heave is kept as it arrives. A ping is one swath (multi-ping sequences are told apart, but not selected).
+        """
+        rec = decode_record(data)
+        kind = rec['RecordType']
+        if kind == 1012:
+            self.s7k['heave'] = float(rec['RTH']['Heave'])
+            return
+        if kind != 7018:
+            self.s7k[kind] = rec
+            return
+        t0 = time.perf_counter()
+        self.last_datagram = time.monotonic()
+        rth, frame = rec['RTH'], rec['Frame']
+        ping = rth['PingNumber']
+        t = time7k_to_epoch(frame['Year'], frame['Day'], frame['Hours'], frame['Minutes'], frame['Seconds'])
+        self.note_ping(ping, t, 1)
+        settings, geometry, detections = self.s7k.get(7000), self.s7k.get(7004), self.s7k.get(7027)
+        if settings is None or settings['RTH']['PingNumber'] != ping or geometry is None:
+            # Its settings weren't played (replay started inside the ping).
+            self.stats['incomplete_ping'] = self.stats.get('incomplete_ping', 0) + 1
+            return
+        if detections is not None and detections['RTH']['PingNumber'] != ping:
+            detections = None
+        s = self.settings
+        depth_offset = (s['transducerDepth_m'] or 0.0) if s['referenceToSurface'] else 0.0
+        try:
+            sums, counts, row0, col0, bottom = grid_7018(rec, settings, geometry, detections, self.s7k.get('heave', 0.0),
+                                                         s['binSize_m'], depth_offset, s['sidelobeSuppression'],
+                                                         self.background)
+        except EmptyPing:
+            self.stats['empty_ping'] += 1
+            return
+        except NoBackground:
+            self.stats['no_background'] += 1
+            return
+        except GridTooLarge:
+            self.stats['grid_too_large'] += 1
+            return
+        b = s['binSize_m']
+        in_band = (bottom[0] >= self.v_band[0] * b) & (bottom[0] < self.v_band[1] * b)
+        seafloor = float(bottom[1][in_band].min()) if in_band.any() else None
+        if self.current is not None:
+            self.finish_swath()
+        self.current = {'key': (ping, rth['MultiPingSequence']), 'block': ((row0, col0), sums, counts), 'time': t,
+                        'seafloor': [seafloor], 'bottom': [bottom]}
+        self.stats['processed'] += 1
+        self.stats['process_ms'] = 0.9 * self.stats['process_ms'] + 0.1 * 1e3 * (time.perf_counter() - t0)
+
     def take_update(self, receiver_stats):
         if self.current is not None and time.monotonic() - self.last_datagram > SWATH_IDLE_S:
             self.finish_swath()  # no more data coming (paused, or the end of a file)
@@ -290,8 +346,11 @@ class Worker:
 
 
 def handle_datagram(worker, item, out_queue):
-    """Process one complete datagram (bytes), live or replayed."""
+    """Process one complete datagram (bytes), live or replayed: Kongsberg, or a 7k record."""
     kind = item[4:8]
+    if kind == S7K_SYNC:
+        worker.process_7k(item)
+        return
     if kind == b'#SVP':
         worker.km.OpenBytestoRead(item)
         svp = worker.km.read_EMdgmSVP()
@@ -351,7 +410,8 @@ class Source:
             # Indexing a large file, or one on a slow or network drive, can take a while: say so meanwhile.
             self.out_queue.put({'type': 'opening', 'name': os.path.basename(command['path'])})
             try:
-                opened = Replay(command['path'])
+                path = command['path']
+                opened = S7kReplay(path) if path.lower().endswith('.s7k') else Replay(path)
             except Exception as e:
                 logger.exception("Can't replay %s", command['path'])
                 self.out_queue.put({'type': 'source', 'error':
