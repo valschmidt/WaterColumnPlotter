@@ -8,6 +8,10 @@ prototype, so changes are listed by date rather than version number.
 
 ## Unreleased
 
+Nothing yet.
+
+## 2026-11-10
+
 ### Added
 - **Replay Teledyne RESON `.s7k` recordings.** Choose an `.s7k` file in the Open dialog, or start with
   `wcp --replay FILE.s7k`, and its water column (7018 beamformed records) is plotted like Kongsberg data, with the
@@ -15,8 +19,6 @@ prototype, so changes are listed by date rather than version number.
   isn't received yet. These files carry no installation record or sound speed profile the plotter reads: for depths
   from the water surface, enter the transducer depth in Settings, and the thermocline comparison with a cast isn't
   available. Installing now also installs pys7k, which reads the files.
-
-## 2026-11-10
 
 ### Fixed
 - **Recordings without bottom detections now display.** Swaths in which no beam detected the bottom (in water deeper
