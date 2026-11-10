@@ -3,4 +3,4 @@
 aiohttp>=3.9
 numpy>=2.0
 pykmall>=1.1.2
-pys7k @ git+https://github.com/valschmidt/pys7k.git
+pys7k>=0.1.0

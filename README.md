@@ -204,7 +204,7 @@ version is replacing. To install it as well, use `pip install -e ".[gui]"` in pl
   [watercolumn_layer_tracker](https://github.com/rolker/watercolumn_layer_tracker).
 
 Kongsberg datagrams are read with [pykmall](https://pypi.org/project/pykmall/), and Teledyne RESON `.s7k` files
-with [pys7k](https://github.com/valschmidt/pys7k). Val Schmidt maintains Water Column
+with [pys7k](https://pypi.org/project/pys7k/). Val Schmidt maintains Water Column
 Plotter and wrote the browser version, with Claude (Anthropic) as an AI coding assistant.
 
 ## Copyright and license
