@@ -8,7 +8,29 @@ prototype, so changes are listed by date rather than version number.
 
 ## Unreleased
 
-Nothing yet.
+On the `wreck-detect` branch, being tried out.
+
+### Added
+- **Wreck detection (experimental).** The **Wreck** button opens a bar for finding the shallowest water column return
+  on a target such as a wreck's mast, after the least-depth workflow of Wyllie, Weber & Armstrong (US Hydrographic
+  Conference 2015). Drag a box around the target on any plot: on the vertical slice it sets the swaths and depth, and
+  shows as a line on the horizontal slice and the pie, which you drag out into a box to set the across-track width.
+  In every swath and across-track cell inside the box, the shallowest cell at or above the **Threshold** is marked
+  with a pink dot, and the shallowest of all with a large ringed dot, on all three plots (on the pie, the dots of
+  swaths it isn't showing are faint). The bar gives that depth and compares it with the sonar's own bottom detections
+  under the box (gray dots), in the same frame, so you can see how much shoaler the water column is than the
+  bathymetry; its tooltip has the details. Beside the threshold, a small histogram of the levels in the box, with
+  those at or above the threshold in pink: drag across it to set the threshold. Point at a detection on any plot for
+  its depth, place, level and time, and, when coordinates are available, its corrected depth and position. Boxes can
+  be moved and resized by their edges. Each viewer has their own.
+- **Export CSV** saves the detections, with a header saying how they were found and what they are not corrected for.
+  With a Kongsberg sonar's #MRZ soundings (received over UDP, or when replaying a .kmwcd, read from the .kmall of the
+  same name in the same folder, the one above or one beside it), each detection also gets a latitude, longitude and
+  depth below the waterline, corrected from the sonar's bottom detections on the same beam, with an uncertainty.
+  These are field estimates: no tide, datum or separation model, and real-time navigation.
+
+### Changed
+- The horizontal slice's depth band is now amber (was magenta), so the pink wreck detections stand out.
 
 ## 2026-11-09
 

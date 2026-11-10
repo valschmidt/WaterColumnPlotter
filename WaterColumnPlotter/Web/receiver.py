@@ -1,6 +1,7 @@
 """
-UDP receiver: reads Kongsberg datagrams from a socket, reassembles partitioned #MWC datagrams, and puts each
-complete #MWC datagram, and any #IIP (installation parameters) or #SVP (sound speed profile), on a queue. Runs in its
+UDP receiver: reads Kongsberg datagrams from a socket, reassembles partitioned #MWC and #MRZ datagrams, and puts each
+complete #MWC datagram, #MRZ (soundings, for wreck coordinates) and any #IIP (installation parameters) or #SVP (sound
+speed profile), on a queue. Runs in its
 own process and does nothing else, so it keeps up with the sonar.
 """
 
@@ -73,7 +74,8 @@ def run(bind_ip, port, multicast_group, out_queue, rcvbuf=8 * 2 ** 20):
     km = kmall()
     pending = {}  # key -> [arrival time, parts list]
     # behind: complete datagrams dropped because the worker's queue was full (processing can't keep up).
-    stats = {'packets': 0, 'datagrams': 0, 'discarded': 0, 'behind': 0}
+    # datagrams: complete #MWC; mrz: complete #MRZ.
+    stats = {'packets': 0, 'datagrams': 0, 'mrz': 0, 'discarded': 0, 'behind': 0}
 
     def forward(item):
         # The queue is bounded, so a worker that falls behind doesn't fill memory with datagrams waiting to be
@@ -94,17 +96,19 @@ def run(bind_ip, port, multicast_group, out_queue, rcvbuf=8 * 2 ** 20):
 
         if data and data[4:8] in (b'#IIP', b'#SVP'):  # Installation parameters (transducer depth); sound speed profile.
             forward(data)
-        elif data and data[4:8] == b'#MWC':
-            stats['packets'] += 1
+        elif data and data[4:8] in (b'#MWC', b'#MRZ'):
+            count = 'datagrams' if data[4:8] == b'#MWC' else 'mrz'
+            if count == 'datagrams':
+                stats['packets'] += 1
             km.OpenBytestoRead(data)
             header = km.read_EMdgmHeader()
             partition = km.read_EMdgmMpartition()
             if partition['numOfDgms'] == 1:
                 forward(data)
-                stats['datagrams'] += 1
+                stats[count] += 1
             else:
-                # Partitions of one datagram share the header's system, sounder and time fields.
-                key = (header['systemID'], header['echoSounderID'], data[12:20])
+                # Partitions of one datagram share the header's type, system, sounder and time fields.
+                key = (data[4:8], header['systemID'], header['echoSounderID'], data[12:20])
                 entry = pending.setdefault(key, [now, [None] * partition['numOfDgms']])
                 entry[1][partition['dgmNum'] - 1] = data
                 if all(entry[1]):
@@ -113,7 +117,7 @@ def run(bind_ip, port, multicast_group, out_queue, rcvbuf=8 * 2 ** 20):
                     if header['dgmVersion'] >= 2:  # REV I+: cmnPart is repeated in every partition.
                         lead_size += km.read_EMdgmMbody()['numBytesCmnPart']
                     forward(reassemble(entry[1], lead_size))
-                    stats['datagrams'] += 1
+                    stats[count] += 1
 
         # Drop datagrams whose partitions did not all arrive.
         for key in [k for k, (t, _) in pending.items() if now - t > INCOMPLETE_TIMEOUT_S]:

@@ -15,6 +15,7 @@ Ideas being tried on the browser plotter. Some may not be kept.
 | Layer tracking | Toolbar "Tracking: Layers" (per viewer); Settings > Tracking > Layer threshold (shared) | `Web/layers.py`, see below. Any number of layers. |
 | Data source: real-time or replay | Source bar under the toolbar: Configure… sets the UDP address; Replay opens the OS Open dialog (the page's own browser for remote viewers); while a file is being indexed, the source badge and the plots say "Opening <file>…" with the seconds so far; `--replay FILE`, `--data-dir DIR` (shared) | `Web/replay.py` plays a recorded file (play/pause, speed, seek). See browser-design.md. |
 | Horizontal slice depth | Horizontal slice header: Amplitude / Depth / Depth, shaded (per viewer) | See below. |
+| Wreck detection (branch `wreck-detect`) | Toolbar "Wreck" (per viewer): drag a box on the plots, set the threshold, Export CSV | `Web/wreck.py`, `Web/georef.py`, `detectWreck` in app.js; see below. |
 | Thermocline tracking and cast alert | Toolbar "Tracking: Thermocline" (per viewer); Settings > Thermocline (shared) | `Web/thermocline.py`, after Cordero Ros (2018), see below. One feature: the thermocline bottom. |
 
 Both trackers run on the server; the Tracking selector chooses which is drawn. They answer different questions:
@@ -192,6 +193,54 @@ finding that the 0.5 m limit was exceeded beyond about 6 m (in deeper water).
 Open questions: he found the method reliable by day (79 % within 3 m) but poor at night and twilight, when migrating
 plankton form other layers; a single-frequency multibeam has no channel agreement to fall back on. Heave is in the
 picked depths. Depths are from the sonar's own sound speed, not ray traced.
+
+### Wreck detection
+
+After Wyllie, Weber & Armstrong, "Using multibeam echosounders for hydrographic surveying in the water column:
+estimating wreck least depths", US Hydrographic Conference 2015. They picked the shallowest wreck return by hand in
+FMMidwater (uncorrected depths) and corrected it by the difference between the nearest bottom detection's uncorrected
+and fully corrected depths ("Method One"). Here:
+
+- **The box (prism).** Swaths x depth x across-track, drawn on the plots (each plot sets the two it shows; one not
+  yet set is drawn as a line, dragged out into a box). Per viewer, not kept between sessions.
+- **Detection** (in the page, on the gridded cells, so the threshold and box update the dots at once): in each column
+  of the box (one swath, one across-track cell), the shallowest cell whose mean level is at or above the threshold.
+  Depths are cell centres, +/- half a cell: use small cells (0.05-0.1 m) for wrecks. The threshold is set on a small
+  histogram of the box's cell levels (square-root counts) in the wreck bar. Pointing at a detection shows it, with its
+  corrected position from the plotter (`POST /wreck/locate`) when there is one.
+- **Comparison with the bathymetry.** Each swath carries the sonar's bottom detections (from #MWC
+  `detectedRangeInSamples`, so any sonar whose water column has them), in the plotter's straight-ray frame. The bar
+  gives the water column's shallowest depth and the shallowest bottom detection under the box (its swaths and
+  across-track, at or below its top). Both have the same frame's errors (sound speed, offsets, water level), so
+  their difference is close to independent of them.
+- **Threshold bias.** Thresholding finds the leading edge of an echo. On the flat seafloor of the test file (EM 2040,
+  28 m, 0.2 m cells, threshold -38.5 dB, no sidelobe suppression) the shallowest detection was 0.8 m above the
+  shallowest bottom detection; at -18.5 dB (near the echo's peak) 0.02 m. Check the threshold on the seafloor beside
+  a target before trusting a mast.
+- **Coordinates (Kongsberg only).** #MRZ gives each bottom detection's corrected position (ray traced, motion and
+  offsets applied, relative to the reference point), the ping's position, heading and water level, and its range in
+  water column samples. Each water column beam is paired with the sounding whose `WCrange_samples` is closest to the
+  beam's own detection (the numbering's base, `WCBeamNumb` or `WCBeamNumb - 1`, isn't documented and the data fit
+  both), within 2 %. A detection's beam is found by its straight-ray angle, between the two nearest paired beams, and
+  it is corrected by two models that bracket the truth: **constant** (the bottom detection's whole correction, as if
+  all the error arose above the detection: Method One per beam) and **scaled** (on the chord from the transducer to
+  the corrected bottom detection, at the detection's fraction of the range: the error spread evenly along the ray).
+  The position is their mean.
+- **Uncertainty** (1 sigma, combined in quadrature): half the two models' difference; half the two neighbouring
+  beams' constant corrections' difference; the bottom detections' own (#MRZ `detectionUncertaintyVer_m` / `Hor_m`);
+  the cell (cell / sqrt 12); and horizontally the footprint (the transmit beam's along-track width and the beam
+  spacing at the detection's range, as uniform). On the test file, at the bottom detections themselves the positions
+  match Kongsberg's soundings to 1.2 mm and the models agree; up the beam the model term grows (4 cm at 3/4 of the
+  range, 14 cm near the transducer, with a total correction of about 0.3 m).
+- **Not applied:** tide or water level beyond the sonar's own, datum, separation model, post-processed navigation;
+  the transducer's movement with roll and pitch. Depths are below the waterline at the time.
+- **Data flow.** The worker pairs each finished swath with its #MRZ (either may arrive first) and sends a correction
+  record (about 10 kB per swath) to the plotter, which keeps it with the swath (counted in the history memory) and
+  uses it at export (`POST /wreck/export`). Parsing #MRZ costs about 1.2 ms per swath against about 26 ms for the
+  water column.
+- **Not yet done:** refining the detections from the raw samples when replaying a file (phase 3 of the plan); a
+  range-ring maximum sidelobe suppression (Weber's, max - 20 dB); speckle rejection; showing the corrected depth in
+  the bar. Real-time #MRZ over UDP is handled by the receiver but hasn't been tried on a live sonar.
 
 ## Requested, not yet prototyped
 

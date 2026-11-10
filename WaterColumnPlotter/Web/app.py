@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 from aiohttp import WSCloseCode, WSMsgType, web
 
-from WaterColumnPlotter.Web import filedialog, gridding, receiver, replay, worker
+from WaterColumnPlotter.Web import filedialog, georef, gridding, receiver, replay, worker, wreck
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,8 @@ def validate_settings(current, requested):
 def swaths_frame(swaths):
     """
     Binary WebSocket frame of encoded swaths (worker.encode_swath): uint32 header length, JSON header
-    {'type': 'swaths', 'swaths': [meta, ...]}, then each swath's rows x cols bytes in turn.
+    {'type': 'swaths', 'swaths': [meta, ...]}, then each swath's bytes in turn: rows x cols grid bytes, then nb float32
+    bottom detection across-track values and nb depths.
     """
     head = json.dumps({'type': 'swaths', 'swaths': [meta for meta, _ in swaths]}).encode()
     return struct.pack('<I', len(head)) + head + b''.join(data for _, data in swaths)
@@ -184,6 +185,10 @@ class Server:
         self.swaths = collections.deque()
         self.swath_bytes = 0
         self.tracks = collections.deque()
+        # Wreck coordinates: each held swath's correction record from #MRZ (georef.correction_record), by seq, in the
+        # order received; the plotter only, counted in the history's memory with the swaths.
+        self.geo = collections.OrderedDict()
+        self.geo_bytes = 0
         self.svp = None  # latest sound speed profile message
         # Data source: real-time UDP (the receiver's address) or replay of a recorded file (dataDir: the directory of
         # the last file opened, where browsing starts). The mode and the file being replayed are the worker's ('source'
@@ -230,16 +235,26 @@ class Server:
         self.swaths.clear()
         self.swath_bytes = 0
         self.tracks.clear()
+        self.geo.clear()
+        self.geo_bytes = 0
 
     def trim_history(self):
         """Keep the newest swaths within both the swath history and its memory budget; tracking goes with them."""
         s = self.settings
         budget = s['historyMemory_MB'] * 1e6
-        while self.swaths and (len(self.swaths) > s['historySwaths'] or self.swath_bytes > budget):
+        while self.swaths and (len(self.swaths) > s['historySwaths'] or self.swath_bytes + self.geo_bytes > budget):
             self.swath_bytes -= len(self.swaths.popleft()[1])
+            self.trim_geo()
         oldest = self.swaths[0][0]['seq'] if self.swaths else None
         while self.tracks and (oldest is None or self.tracks[0]['seq1'] < oldest):
             self.tracks.popleft()
+        self.trim_geo()
+
+    def trim_geo(self):
+        """Drop correction records of swaths no longer held."""
+        oldest = self.swaths[0][0]['seq'] if self.swaths else None
+        while self.geo and (oldest is None or next(iter(self.geo)) < oldest):
+            self.geo_bytes -= georef.record_bytes(self.geo.popitem(last=False)[1])
 
     # ----- Worker results -----
 
@@ -282,6 +297,9 @@ class Server:
                     await self.change_settings({'transducerDepth_m': msg['transducerDepth_m']})
             elif msg['type'] == 'update':
                 self.stats = msg['stats']
+                for seq, record in msg['geo']:
+                    self.geo[seq] = record
+                    self.geo_bytes += georef.record_bytes(record)
                 if msg['swaths']:
                     self.swaths.extend(msg['swaths'])
                     self.swath_bytes += sum(len(data) for _, data in msg['swaths'])
@@ -337,6 +355,37 @@ class Server:
             return web.json_response({'cancelled': True})
         await self.source_command({'cmd': 'open', 'path': path})
         return web.json_response({'path': path})
+
+    async def wreck_export(self, request):
+        """The wreck detections a page found (see wreck.export_csv), as a CSV file to save."""
+        try:
+            body = await request.json()
+            seqs = {d['seq'] for d in body['detections']}
+            swaths = {meta['seq']: meta for meta, _ in self.swaths if meta['seq'] in seqs}
+            replaying = self.source.get('mode') == 'replay' and self.source.get('replay')
+            source = self.source['replay']['name'] if replaying else 'real-time (UDP)'
+            geo = {seq: self.geo[seq] for seq in seqs if seq in self.geo}
+            name, text = wreck.export_csv(body, swaths, self.settings, source, geo)
+        except (ValueError, KeyError, TypeError) as e:
+            return web.Response(status=400, text=f"Bad export request: {e}")
+        return web.Response(text=text, content_type='text/csv',
+                            headers={'Content-Disposition': f'attachment; filename="{name}"'})
+
+    async def wreck_locate(self, request):
+        """
+        One wreck detection's corrected position, {seq, across, depth} -> georef.locate's dict (rounded), or {} if its
+        swath has no correction record (no #MRZ) or it lies outside the paired beams.
+        """
+        try:
+            body = await request.json()
+            record = self.geo.get(int(body['seq']))
+            found = record and georef.locate(record, float(body['across']), float(body['depth']),
+                                             self.settings['binSize_m'])
+        except (ValueError, KeyError, TypeError) as e:
+            return web.Response(status=400, text=f"Bad request: {e}")
+        if not found:
+            return web.json_response({})
+        return web.json_response({k: round(v, 8 if k in ('lat', 'lon') else 3) for k, v in found.items()})
 
     async def websocket(self, request):
         ws = web.WebSocketResponse(heartbeat=30)
@@ -471,11 +520,14 @@ class Server:
         return response
 
     def make_app(self):
-        app = web.Application(middlewares=[self.revalidate])
+        # client_max_size: a wreck export can list tens of thousands of detections.
+        app = web.Application(middlewares=[self.revalidate], client_max_size=64 * 2 ** 20)
         app.router.add_get('/', self.index)
         app.router.add_get('/ws', self.websocket)
         app.router.add_get('/browse', self.browse)
         app.router.add_post('/choose-file', self.choose_file)
+        app.router.add_post('/wreck/export', self.wreck_export)
+        app.router.add_post('/wreck/locate', self.wreck_locate)
         app.router.add_static('/static/', STATIC_DIR)
         app.on_startup.append(self.on_startup)
         app.on_shutdown.append(self.on_shutdown)

@@ -148,6 +148,12 @@ viewing shares the same settings and data source.
 `wcp --help` lists them too. The plotter's own settings (cell size, sidelobe suppression, tracking and
 so on) are in the page's **Settings** panel.
 
+**Wreck detection (experimental).** The **Wreck** button finds the shallowest water column return on a target, such
+as a wreck's mast, inside a box you drag on the plots, and compares it with the sonar's own bottom detections. Its
+**Export CSV** saves the detections; with Kongsberg #MRZ soundings available (over UDP, or the `.kmall` recorded
+with a `.kmwcd`) they include latitude, longitude and depth below the waterline with an uncertainty. These are field
+estimates, not charted depths: see [Experiments](docs/experiments.md#wreck-detection).
+
 ## The original Qt version
 
 This repository also holds the original desktop version of Water Column Plotter, written with PyQt5, which the browser
