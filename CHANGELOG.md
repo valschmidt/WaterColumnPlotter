@@ -8,7 +8,12 @@ prototype, so changes are listed by date rather than version number.
 
 ## Unreleased
 
-Nothing yet.
+### Added
+- **New sidelobe suppression option to try: "Subtract range median and beam noise floor fit".** After the range
+  median, each beam's noise floor is fitted with a smooth curve that follows the quietest samples, so echoes don't
+  pull it up, and is subtracted. Levels are then shown as dB above each beam's noise floor. Experimental: on the
+  Reson T51R it evens out the water inside the nearest-seafloor ring better than the median options; on Kongsberg
+  data it can leave stripes from beam to beam.
 
 ## 2026-11-10
 

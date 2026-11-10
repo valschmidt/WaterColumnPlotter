@@ -23,8 +23,8 @@ tracking follows the one edge expected to mark the bottom of the thermocline, ti
 
 ### Sidelobe suppression
 
-Options, applied to each swath's samples before gridding (values become dB relative to the subtracted level). The two
-median options use Kongsberg's transmit sectors and are in `Web/kongsberg.py`, since only multisector sonars need
+Options, applied to each swath's samples before gridding (values become dB relative to the subtracted level). The
+median options use Kongsberg's transmit sectors (a 7k ping is taken as one sector) and are in `Web/kongsberg.py`, since only multisector sonars need
 them; the medians themselves are in `Web/medians.py`.
 
 - **Subtract median per sector**: at each range sample, subtract the median over each transmit sector's beams at
@@ -35,6 +35,20 @@ them; the medians themselves are in `Web/medians.py`.
   the range median per sector. Also evens out the beam pattern within sectors, which the median per sector leaves as
   bright stripes at the centre sector's edges (below). The beam step is split at the minimum slant range because
   beyond it a beam's level has nothing to do with its level in the water.
+- **Subtract range median and beam noise floor fit** (`median_range_poly_beam`, 2026-11-10): subtract the range
+  median per sector, then each beam's noise floor: a quadratic in range fitted, beam by beam, to what is left (down to
+  the bottom detection, including the sidelobe region) by weighted least squares with weights 1 / linear power,
+  1 / (10^(dB/10) + 1e-12), so the fit follows the quietest samples: one 30 dB above the floor weighs 1/1000 as
+  much. Values become dB above each beam's floor rather than relative to a median. (`medians.per_beam_floor_fit`.)
+  - Synthetic check (64 beams, known quadratic floors, +-3 dB noise, 10% of samples 20-50 dB echoes): the fit lands
+    0.66 dB below the true floor (5-95%: 0.54 to 0.78 dB below); an unweighted fit is pulled 3.5 dB above it.
+  - Speed: about 30 ms for 870,000 samples (a T51R ping to the bottom), using `np.add.reduceat` over each beam's
+    contiguous samples (`np.bincount` took 54 ms, the first version 85 ms). Per ping through the worker: 43 ms on
+    the EM 2040 file, 53 ms on T51R (11.2 pings/s), about the same as range and beam medians.
+  - First look (one ping each): on T51R, the water inside the minimum slant range is darker and more even than with
+    range and beam medians, and the bright wedge under nadir that those leave is gone; beyond the minimum slant
+    range it stays several dB above the water inside. On the EM 2040 file, beam-to-beam differences between fits
+    show as radial stripes.
 - **Subtract each beam's mean of recent pings**: from each beam's sample at each range, subtract that beam's mean at
   that range over the previous N swaths in the same position (Settings > Background swaths, default 10), kept per
   receive fan. Removes whatever is the same from ping to ping in a beam, so only changes remain (moving targets,
