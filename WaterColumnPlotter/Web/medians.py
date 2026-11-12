@@ -1,5 +1,5 @@
 """
-Medians over the samples of one swath, used for sidelobe suppression. Samples are flat arrays with a beam index and a
+Medians over the samples of one swath, and a per-beam noise floor fit, used for sidelobe suppression. Samples are flat arrays with a beam index and a
 range sample number each (as gridding.grid_mwc builds them), so these work for any sonar's beam-formed samples.
 """
 
@@ -39,3 +39,43 @@ def per_beam_split_median(values, beam_index, sample_number, split_sample):
     row = beam_index * 2 + after  # one table row per (beam, side)
     counts = np.bincount(row, minlength=2 * (int(beam_index.max()) + 1))
     return sorted_median(values, row, sample_number - sample_number.min(), counts)[row]
+
+
+FLOOR_FIT_EPSILON = 1e-12  # added to linear power before inverting it for a weight (-120 dB): a safeguard only
+
+
+def per_beam_floor_fit(values, beam_index, sample_number, degree=2):
+    """
+    For every sample, its beam's noise floor: a polynomial of the given degree in range sample number, fitted to the
+    beam's values (dB) by weighted least squares with weights 1 / linear power (1 / (10^(dB/10) + FLOOR_FIT_EPSILON)),
+    so samples near the floor dominate and strong echoes (seafloor, sidelobes, targets) pull the fit up very little:
+    a sample 30 dB above the floor has 1/1000 of the weight. A beam with too few samples for the degree gets the
+    minimum-norm solution.
+    """
+    if np.any(np.diff(beam_index) < 0):  # each beam's samples together, for np.add.reduceat
+        order = np.argsort(beam_index, kind='stable')
+        fit = np.empty_like(values)
+        fit[order] = per_beam_floor_fit(values[order], beam_index[order], sample_number[order], degree)
+        return fit
+    v = values.astype(np.float64)
+    s0, s1 = int(sample_number.min()), int(sample_number.max())
+    x = (sample_number - s0) * (1.0 / max(s1 - s0, 1))  # range scaled to [0, 1], for well-conditioned sums
+    w = 1.0 / (np.exp(v * (np.log(10.0) / 10.0)) + FLOOR_FIT_EPSILON)  # 1 / (10^(dB/10) + epsilon)
+    starts = np.flatnonzero(np.r_[True, np.diff(beam_index) != 0])  # where each beam's samples begin
+    group = np.repeat(np.arange(len(starts)), np.diff(np.r_[starts, len(beam_index)]))  # beam's position in starts
+    n = degree + 1
+    # Per beam: sums of w x^k (k = 0 .. 2 degree) and of w x^k y (k = 0 .. degree), building the powers in place.
+    sw, swy = np.empty((len(starts), 2 * n - 1)), np.empty((len(starts), n))
+    wx, wxy = w, w * v
+    for k in range(2 * n - 1):
+        sw[:, k] = np.add.reduceat(wx, starts)
+        if k < n:
+            swy[:, k] = np.add.reduceat(wxy, starts)
+            wxy = wxy * x
+        wx = wx * x
+    normal = sw[:, np.arange(n)[:, None] + np.arange(n)[None, :]]  # (beams, n, n): sum of w x^(i + j)
+    coef = (np.linalg.pinv(normal) @ swy[:, :, None])[:, :, 0]  # (beams, n), lowest power first
+    fit = coef[group, n - 1]
+    for j in range(n - 2, -1, -1):  # Horner's rule
+        fit = fit * x + coef[group, j]
+    return fit.astype(values.dtype)

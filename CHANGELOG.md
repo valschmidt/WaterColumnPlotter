@@ -44,6 +44,21 @@ On the `wreck-detect` branch, being tried out.
   and stays shown when the mouse is over something that can be dragged or a wreck detection, with a short note about
   it after a "·".
 
+## 2026-11-12
+
+### Added
+- **Play a whole folder of recordings.** With **Play folder** checked in the replay controls (the default), when a
+  file ends the next recording of the same type in its folder plays on, without clearing the plots, so a survey
+  split into many short files (the Reson T51R writes one every 15 seconds) plays as one. Files that can't be played
+  are skipped, with a note saying why.
+- **Zoom one direction at a time.** Hold **H** while turning the mouse wheel over a plot to zoom horizontally only,
+  or **V** to zoom vertically only, for instance to stretch depth on the pie. Double-click the plot to fit it again.
+- **New sidelobe suppression option to try: "Subtract range median and beam noise floor fit".** After the range
+  median, each beam's noise floor is fitted with a smooth curve that follows the quietest samples, so echoes don't
+  pull it up, and is subtracted. Levels are then shown as dB above each beam's noise floor. Experimental: on the
+  Reson T51R it evens out the water inside the nearest-seafloor ring better than the median options; on Kongsberg
+  data it can leave stripes from beam to beam.
+
 ## 2026-11-10
 
 ### Added

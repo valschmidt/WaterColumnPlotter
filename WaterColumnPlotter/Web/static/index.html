@@ -90,6 +90,8 @@
           <option value="10">10×</option>
           <option value="0">Max</option>
         </select></label>
+      <label title="When a file ends, play on through the next recordings of the same type in its folder (by name), without clearing the display. Files that can't be played are skipped.">
+        <input id="replay-folder" type="checkbox" checked disabled> Play folder</label>
       <input id="replay-position" type="range" min="0" max="1" step="any" value="0" disabled aria-label="Position in the recording" title="Position in the recording. Moving it restarts the display from there.">
       <span id="replay-time" class="source-state"></span>
     </span>
@@ -136,11 +138,12 @@
             <option value="first">First only</option>
             <option value="second">Second only</option>
           </select></label>
-        <label title="Kongsberg multisector sonars. “Median per sector” subtracts, at each range, the median of each transmit sector's beams at that range: suppresses the seafloor echo received through sidelobes beyond the minimum slant range and evens out level differences between sectors; values become dB relative to that level. “Range and beam medians” first subtracts each beam's median, taken separately inside and beyond the minimum slant range, evening out the beam pattern within sectors, then the range median per sector. “Each beam's mean of recent pings” subtracts, from every beam at every range, that beam's mean there over its last few swaths (Background swaths): whatever stays the same from swath to swath, including layers that don't move. Applies immediately, for everyone.">Sidelobe suppression
+        <label title="Kongsberg multisector sonars. “Median per sector” subtracts, at each range, the median of each transmit sector's beams at that range: suppresses the seafloor echo received through sidelobes beyond the minimum slant range and evens out level differences between sectors; values become dB relative to that level. “Range and beam medians” first subtracts each beam's median, taken separately inside and beyond the minimum slant range, evening out the beam pattern within sectors, then the range median per sector. “Range median and beam noise floor fit” subtracts the range median per sector, then each beam's noise floor: a quadratic in range fitted to what is left, weighting each sample by one over its power so the fit follows the quietest samples rather than echoes. “Each beam's mean of recent pings” subtracts, from every beam at every range, that beam's mean there over its last few swaths (Background swaths): whatever stays the same from swath to swath, including layers that don't move. Applies immediately, for everyone.">Sidelobe suppression
           <select name="sidelobeSuppression">
             <option value="off">Off</option>
             <option value="median_sector">Subtract median per sector</option>
             <option value="median_beam">Subtract range and beam medians</option>
+            <option value="median_range_poly_beam">Subtract range median and beam noise floor fit</option>
             <option value="ping_mean">Subtract each beam's mean of recent pings</option>
           </select></label>
         <label id="background-swaths" hidden title="“Subtract each beam's mean of recent pings”: how many previous swaths in the same position (a dual-swath system's fore or aft swath) are averaged into each beam's background at each range. Fewer adapt faster; more suppress more steadily but also remove layers that change slowly.">Background swaths<input name="backgroundSwaths" type="number" step="1" min="1" max="100"></label>
@@ -196,7 +199,7 @@
         <h2>Pie</h2>
         <button class="live" type="button" aria-pressed="true" title="Show the newest swaths as they arrive. Dragging the pie's time line (white, in either slice) to an earlier time shows those swaths instead; click here, or drag the line back to the newest end, to follow the data again.">Live</button>
         <span class="pie-time"></span>
-        <button class="autozoom" type="button" aria-pressed="true" title="Fit this plot to the data as it arrives. Zooming (wheel) or panning (drag) turns it off; click here or double-click the plot to turn it back on.">Auto-zoom</button>
+        <button class="autozoom" type="button" aria-pressed="true" title="Fit this plot to the data as it arrives. Zooming (wheel; hold H to zoom horizontally only, V vertically only) or panning (drag) turns it off; click here or double-click the plot to turn it back on.">Auto-zoom</button>
         <span class="readout"></span>
         <span class="levels">
           <input class="lo" type="number" step="any" aria-label="Color scale minimum (dB)"> to
@@ -213,7 +216,7 @@
           <option value="depth">Depth</option>
           <option value="shaded">Depth, shaded</option>
         </select>
-        <button class="autozoom" type="button" aria-pressed="true" title="Fit this plot to the data as it arrives. Zooming (wheel) or panning (drag) turns it off; click here or double-click the plot to turn it back on.">Auto-zoom</button>
+        <button class="autozoom" type="button" aria-pressed="true" title="Fit this plot to the data as it arrives. Zooming (wheel; hold H to zoom horizontally only, V vertically only) or panning (drag) turns it off; click here or double-click the plot to turn it back on.">Auto-zoom</button>
         <span class="readout"></span>
         <span class="levels">
           <input class="lo" type="number" step="any" aria-label="Color scale minimum (dB)"> to
@@ -225,7 +228,7 @@
     <section class="panel" id="vertical">
       <div class="panel-head">
         <h2>Vertical slice</h2>
-        <button class="autozoom" type="button" aria-pressed="true" title="Fit this plot to the data as it arrives. Zooming (wheel) or panning (drag) turns it off; click here or double-click the plot to turn it back on.">Auto-zoom</button>
+        <button class="autozoom" type="button" aria-pressed="true" title="Fit this plot to the data as it arrives. Zooming (wheel; hold H to zoom horizontally only, V vertically only) or panning (drag) turns it off; click here or double-click the plot to turn it back on.">Auto-zoom</button>
         <span class="readout"></span>
         <span class="levels">
           <input class="lo" type="number" step="any" aria-label="Color scale minimum (dB)"> to

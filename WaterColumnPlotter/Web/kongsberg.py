@@ -11,14 +11,16 @@ seafloor is far above the water inside it.
 
 import numpy as np
 
-from WaterColumnPlotter.Web.medians import across_beam_median, per_beam_split_median
+from WaterColumnPlotter.Web.medians import across_beam_median, per_beam_floor_fit, per_beam_split_median
 
 # Sidelobe suppression choices handled here:
 # 'median_sector': at each range sample, subtract the median over each transmit sector's beams.
 # 'median_beam': first subtract each beam's median, taken separately inside the minimum slant range and beyond
 #   it (so the much louder sidelobe region beyond it is levelled against itself, not against the water), then the
 #   range median per sector.
-OPTIONS = ('median_sector', 'median_beam')
+# 'median_range_poly_beam': subtract the range median per sector, then each beam's noise floor: a quadratic in range
+#   fitted to what is left, weighted by 1 / linear power (medians.per_beam_floor_fit).
+OPTIONS = ('median_sector', 'median_beam', 'median_range_poly_beam')
 
 
 def suppress_sidelobes(dg, how, amplitudes, beam_index, sample_number, min_slant_range_sample):
@@ -30,4 +32,7 @@ def suppress_sidelobes(dg, how, amplitudes, beam_index, sample_number, min_slant
     if how == 'median_beam':
         amplitudes = amplitudes - per_beam_split_median(amplitudes, beam_index, sample_number, min_slant_range_sample)
     sector = np.asarray(dg['beamData']['beamTxSectorNum'], dtype=np.int64)[beam_index]
-    return amplitudes - across_beam_median(amplitudes, beam_index, sample_number, sector)
+    amplitudes = amplitudes - across_beam_median(amplitudes, beam_index, sample_number, sector)
+    if how == 'median_range_poly_beam':
+        amplitudes = amplitudes - per_beam_floor_fit(amplitudes, beam_index, sample_number)
+    return amplitudes

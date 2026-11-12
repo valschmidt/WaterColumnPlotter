@@ -18,7 +18,7 @@ import itertools
 import numpy as np
 
 from WaterColumnPlotter.Web import kongsberg
-from WaterColumnPlotter.Web.medians import across_beam_median, per_beam_split_median
+from WaterColumnPlotter.Web.medians import across_beam_median, per_beam_floor_fit, per_beam_split_median
 
 # Largest block one datagram may be gridded into. A cell size that is very small for the swath would otherwise use
 # a great deal of memory.
@@ -250,9 +250,11 @@ def grid_7018(wc, settings, geometry, detections, heave, bin_size, depth_offset=
 
     if sidelobe_suppression == 'median_beam':
         amplitudes = amplitudes - per_beam_split_median(amplitudes, beam_index, sample_number, min_slant_range)
-    if sidelobe_suppression in ('median_sector', 'median_beam'):
+    if sidelobe_suppression in kongsberg.OPTIONS:
         amplitudes = amplitudes - across_beam_median(amplitudes, beam_index, sample_number)
-    elif sidelobe_suppression == 'ping_mean':
+    if sidelobe_suppression == 'median_range_poly_beam':
+        amplitudes = amplitudes - per_beam_floor_fit(amplitudes, beam_index, sample_number)
+    if sidelobe_suppression == 'ping_mean':
         amplitudes, beam_index, sample_number = subtract_ping_mean(
             background, ('7k', wc['RTH']['MultiPingSequence']), amplitudes, beam_index, sample_number)
 
