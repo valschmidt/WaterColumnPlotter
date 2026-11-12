@@ -8,6 +8,10 @@ prototype, so changes are listed by date rather than version number.
 
 ## Unreleased
 
+Nothing yet.
+
+## 2026-11-12
+
 ### Added
 - **Play a whole folder of recordings.** With **Play folder** checked in the replay controls (the default), when a
   file ends the next recording of the same type in its folder plays on, without clearing the plots, so a survey
