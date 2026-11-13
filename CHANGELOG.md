@@ -8,7 +8,9 @@ prototype, so changes are listed by date rather than version number.
 
 ## Unreleased
 
-On the `wreck-detect` branch, being tried out.
+Nothing yet.
+
+## 2026-11-13
 
 ### Added
 - **Wreck detection (experimental).** The **Wreck** button opens a bar for finding the shallowest water column return
