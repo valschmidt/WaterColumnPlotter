@@ -25,6 +25,7 @@ from KMALL.kmall import kmall
 from PYS7K.frame import time7k_to_epoch
 from PYS7K.registry import decode_record
 
+from WaterColumnPlotter.Web import georef
 from WaterColumnPlotter.Web.gridding import EmptyPing, GridTooLarge, NoBackground, PingBackground, add_blocks, average, grid_7018, grid_mwc, vertical_band
 from WaterColumnPlotter.Web.layers import LayerTracker
 from WaterColumnPlotter.Web.replay import Replay, list_directory
@@ -45,6 +46,9 @@ CALIBRATION_PICKS = 10
 # A swath is complete when the next one starts; if no datagram has arrived for this long, it is taken as complete.
 SWATH_IDLE_S = 0.5
 NO_DATA = 255  # encoded cell with no data
+# Wreck coordinates (georef.py): #MRZ datagrams waiting for their swath, and finished swaths waiting for their #MRZ,
+# are kept for this many swaths (they arrive within a ping or two of each other).
+GEO_PENDING = 64
 S7K_SYNC = b'\xff\xff\x00\x00'  # bytes 4-8 of every 7k record (its sync pattern); Kongsberg has the datagram type there
 
 RESET_SETTINGS = ('binSize_m', 'alongTrackAvg_swath', 'referenceToSurface', 'transducerDepth_m', 'sidelobeSuppression',
@@ -54,12 +58,14 @@ RESET_SETTINGS = ('binSize_m', 'alongTrackAvg_swath', 'referenceToSurface', 'tra
 DUAL_SWATH = {'both': None, 'first': 0, 'second': 1}
 
 
-def encode_swath(meta, block):
+def encode_swath(meta, block, bottom=None):
     """
     A swath's grid for the pages: its mean level (dB) per cell, cropped to the cells with data, quantized to one byte
     per cell as base + q * step dB (q = NO_DATA where there is none). The step is the swath's range over 254 levels:
     0.5 dB for the 127 dB range of Kongsberg's samples, finer when the range is smaller.
-    Returns (meta with row0, col0, rows, cols, base, step added, bytes), or None if the swath has no data.
+    bottom: the sonar's bottom detections as (across-track, depth) arrays (m, in the grid's straight-ray frame); they
+    follow the grid bytes as nb float32 across-track values, then nb depths.
+    Returns (meta with row0, col0, rows, cols, base, step, nb added, bytes), or None if the swath has no data.
     """
     (row0, col0), sums, counts = block
     rows, cols = np.flatnonzero(counts.any(axis=1)), np.flatnonzero(counts.any(axis=0))
@@ -74,8 +80,10 @@ def encode_swath(meta, block):
     step = max((hi - lo) / 254, 0.01)
     q = np.full(mean.shape, NO_DATA, dtype=np.uint8)
     q[has] = np.clip(np.round((mean[has] - lo) / step), 0, 254)
+    across, depth = bottom if bottom is not None else (np.zeros(0), np.zeros(0))
     return ({**meta, 'row0': int(row0 + r0), 'col0': int(col0 + c0), 'rows': int(r1 - r0), 'cols': int(c1 - c0),
-             'base': round(lo, 4), 'step': round(step, 6)}, q.tobytes())
+             'base': round(lo, 4), 'step': round(step, 6), 'nb': len(across)},
+            q.tobytes() + np.asarray(across, '<f4').tobytes() + np.asarray(depth, '<f4').tobytes())
 
 
 def band_sum(sums, counts, offset, band, axis):
@@ -96,6 +104,7 @@ class Worker:
     def __init__(self, settings):
         self.settings = dict(settings)
         self.km = kmall()
+        self.transducer = None  # transmit transducer (x, y, z) from the vessel reference point, from #IIP
         self.s7k = {}  # 7k: the latest 7000, 7004 and 7027 records, by record type, and 'heave' (m, from 1012)
         self.svp = None  # latest cast: {'depth', 'speed', 'top', 'bottom'} (depths below the surface)
         self.stats = {'processed': 0, 'empty_ping': 0, 'no_background': 0, 'grid_too_large': 0, 'swath_skipped': 0, 'process_ms': 0.0,
@@ -121,7 +130,9 @@ class Worker:
     def reset(self):
         s = self.settings
         self.seq = 0             # number of the next swath completed
-        self.current = None      # swath being received: {'key': (pingCnt, swathAlongPosition), 'block', 'time', 'seafloor'}
+        # Swath being received: {'key': (pingCnt, swathAlongPosition), 'block', 'time', 'seafloor', 'bottom'}, the last
+        # two per receive head.
+        self.current = None
         self.last_datagram = time.monotonic()
         self.new_swaths = []     # completed swaths since the last update: (meta, bytes) from encode_swath
         # Tracking column being accumulated: {'seq0', 'v': block, 'times': [], 'seafloor': []}
@@ -132,6 +143,13 @@ class Worker:
                                               along_track_s=s['thermoclineWindow_s'])
         self.v_band = vertical_band(s)
         self.background = PingBackground(s['backgroundSwaths'])  # for 'ping_mean' sidelobe suppression
+        # Wreck coordinates: #MRZ summaries by (pingCnt, swathAlongPosition) -> {receive head: georef.mrz_summary}; finished
+        # swaths' plotter frames by the same key -> (seq, {receive head: georef.beam_geometry}); and correction records
+        # made since the last update, [(seq, record)].
+        self.mrz = collections.OrderedDict()
+        self.finished = collections.OrderedDict()
+        self.new_geo = []
+        self.stats['georeferenced'] = 0  # swaths with a correction record, since the data was cleared
 
     def apply_settings(self, new):
         """Returns True if everything processed so far was discarded (so displays must clear their history)."""
@@ -150,10 +168,17 @@ class Worker:
     def finish_swath(self):
         """The swath being received is complete: encode it for the pages and add it to the tracking column."""
         c, self.current = self.current, None
-        encoded = encode_swath({'seq': self.seq, 't': c['time'], 'ping': c['key'][0], 'pos': c['key'][1]}, c['block'])
+        bottom = (np.concatenate([b[0] for b in c['bottom']]), np.concatenate([b[1] for b in c['bottom']]))
+        encoded = encode_swath({'seq': self.seq, 't': c['time'], 'ping': c['key'][0], 'pos': c['key'][1]}, c['block'],
+                               bottom)
         if encoded is None:
             return
         self.new_swaths.append(encoded)
+        if c['geom']:  # Kongsberg: waits for its #MRZ (wreck coordinates)
+            self.finished[c['key']] = (self.seq, c['geom'])
+            self.pair_geo(c['key'])
+            while len(self.finished) > GEO_PENDING:
+                self.finished.popitem(last=False)
         (row0, col0), sums, counts = c['block']
         v = band_sum(sums, counts, (row0, col0), self.v_band, axis=1)  # per row, over the across-track band
         found = [z for z in c['seafloor'] if z is not None]
@@ -233,11 +258,17 @@ class Worker:
     def process_installation(self, data):
         """
         #IIP: returns the transmit transducer's depth below the waterline (m), or None if it isn't in the datagram.
-        Installation z values are positive down from the vessel reference point.
+        Installation z values are positive down from the vessel reference point. Also keeps the transducer's position
+        from the reference point (x forward, y starboard, z down), for wreck coordinates.
         """
         self.km.OpenBytestoRead(data)
         install = self.km.read_EMdgmIIP(translate=True)['install_txt']
         # Separate transmit array (TRAI_TX1), or a combined transmit/receive head (TRAI_HD1).
+        prefix = 'tx_transducer_1' if 'tx_transducer_1_vertical_location' in install else 'transducer_1'
+        try:
+            self.transducer = tuple(float(install[f'{prefix}_{axis}_location']) for axis in ('along', 'athwart', 'vertical'))
+        except (KeyError, ValueError):
+            self.transducer = None
         tx_z = install.get('tx_transducer_1_vertical_location', install.get('transducer_1_vertical_location'))
         waterline_z = install.get('waterline_vertical_location')
         if tx_z is None or waterline_z is None:
@@ -278,13 +309,41 @@ class Worker:
         if self.current is not None and self.current['key'] != key:
             self.finish_swath()
         if self.current is None:
-            self.current = {'key': key, 'block': block, 'time': dg['header']['dgtime'], 'seafloor': [seafloor]}
+            self.current = {'key': key, 'block': block, 'time': dg['header']['dgtime'], 'seafloor': [seafloor],
+                            'bottom': [bottom], 'geom': {}}
         else:  # another receive head's datagram of the same swath
             self.current['block'] = add_blocks(self.current['block'], block)
             self.current['seafloor'].append(seafloor)
+            self.current['bottom'].append(bottom)
+        self.current['geom'][cmn['rxTransducerInd']] = georef.beam_geometry(dg, depth_offset)
 
         self.stats['processed'] += 1
         self.stats['process_ms'] = 0.9 * self.stats['process_ms'] + 0.1 * 1e3 * (time.perf_counter() - t0)
+
+    def process_mrz(self, data):
+        """#MRZ: kept for its swath's correction record (wreck coordinates)."""
+        self.km.OpenBytestoRead(data)
+        dg = self.km.read_EMdgmMRZ()
+        cmn = dg['cmnPart']
+        key = (cmn['pingCnt'], cmn['swathAlongPosition'])
+        self.mrz.setdefault(key, {})[cmn['rxTransducerInd']] = georef.mrz_summary(dg)
+        while len(self.mrz) > GEO_PENDING:
+            self.mrz.popitem(last=False)
+        self.pair_geo(key)
+
+    def pair_geo(self, key):
+        """Make a swath's correction record once it is finished and its #MRZ has arrived (in either order)."""
+        if key not in self.finished or key not in self.mrz:
+            return
+        seq, geoms = self.finished[key]
+        mrzs = self.mrz[key]
+        if set(geoms) - set(mrzs):
+            return  # another receive head's #MRZ is still to come
+        del self.finished[key], self.mrz[key]
+        record = georef.correction_record(geoms, mrzs, self.transducer)
+        if record is not None:
+            self.new_geo.append((seq, record))
+            self.stats['georeferenced'] += 1
 
     def process_7k(self, data):
         """
@@ -333,7 +392,7 @@ class Worker:
         if self.current is not None:
             self.finish_swath()
         self.current = {'key': (ping, rth['MultiPingSequence']), 'block': ((row0, col0), sums, counts), 'time': t,
-                        'seafloor': [seafloor], 'bottom': [bottom]}
+                        'seafloor': [seafloor], 'bottom': [bottom], 'geom': {}}  # no #MRZ for 7k: no coordinates
         self.stats['processed'] += 1
         self.stats['process_ms'] = 0.9 * self.stats['process_ms'] + 0.1 * 1e3 * (time.perf_counter() - t0)
 
@@ -342,7 +401,9 @@ class Worker:
             self.finish_swath()  # no more data coming (paused, or the end of a file)
         swaths, self.new_swaths = self.new_swaths, []
         tracks, self.new_tracks = self.new_tracks, []
-        return {'type': 'update', 'swaths': swaths, 'tracks': tracks, 'stats': {**receiver_stats, **self.stats}}
+        geo, self.new_geo = self.new_geo, []
+        return {'type': 'update', 'swaths': swaths, 'tracks': tracks, 'geo': geo,
+                'stats': {**receiver_stats, **self.stats}}
 
 
 def handle_datagram(worker, item, out_queue):
@@ -365,6 +426,8 @@ def handle_datagram(worker, item, out_queue):
             out_queue.put({'type': 'installation', 'transducerDepth_m': round(depth, 3)})
     elif kind == b'#MWC':
         worker.process(item)
+    elif kind == b'#MRZ':
+        worker.process_mrz(item)
 
 
 class Source:

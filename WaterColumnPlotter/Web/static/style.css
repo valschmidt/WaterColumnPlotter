@@ -366,3 +366,27 @@ button:disabled:hover { border-color: var(--border); }
   font-variant-numeric: tabular-nums;
   cursor: default;
 }
+
+/* Wreck detection bar: magenta edge, like the detections. */
+#wreck-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 12px;
+  border-left: 4px solid #ff3fd0;
+}
+#wreck-bar[hidden] { display: none; }
+#wreck-bar label { display: inline-flex; align-items: center; gap: 4px; }
+#wreck-threshold { width: 5em; }
+/* No taller than the bar's controls. */
+.wreck-hist { width: 180px; max-width: 30vw; height: 22px; border: 1px solid var(--bar-border); border-radius: 3px;
+  cursor: ew-resize; touch-action: none; }
+/* One line, so the bar's height (and the plots' size) doesn't change while a box is dragged; the full text is in the
+   tooltip. */
+.wreck-help, .wreck-result { flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wreck-help { color: var(--muted); }
+.wreck-help:empty { display: none; }
+.wreck-result { font-variant-numeric: tabular-nums; }
+.wreck-result:empty { display: none; }
+.wreck-geo { white-space: nowrap; color: var(--muted); }
+.wreck-geo.ok { color: var(--ok); }

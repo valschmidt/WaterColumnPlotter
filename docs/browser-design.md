@@ -190,7 +190,7 @@ so the history is also limited by memory:
   heave allowance above 0 m.
 - Horizontal and vertical slices: with auto-zoom on, the x-axis spans the full history and the newest ping stays at
   the right edge, so new data scrolls in from the right at a constant scale.
-- Draggable indicators. The horizontal slice's depth band (magenta) is drawn on the pie and the vertical slice;
+- Draggable indicators. The horizontal slice's depth band (amber) is drawn on the pie and the vertical slice;
   the vertical slice's across-track band (cyan) on the pie and the horizontal slice. Dragging a band's dashed edge
   widens or narrows it about its centre, its centre line moves it (a band under 16 px: inside moves it, just outside
   an edge resizes it), snapped to cell edges. The pie's time (white line, over the swaths it
@@ -213,7 +213,8 @@ so the history is also limited by memory:
 - Then once per update interval (default 1 s), the swaths completed since the last update and their tracking
   results. A swath is complete when the next one starts, or after 0.5 s without data.
 - Swath frames are binary: uint32 header length, JSON header `{type: 'swaths', swaths: [{seq, t, ping, pos, row0,
-  col0, rows, cols, base, step}]}`, then each swath's rows x cols bytes. Tracking results are JSON:
+  col0, rows, cols, base, step, nb}]}`, then each swath's rows x cols bytes followed by its nb bottom detections
+  (float32 across-track values, then float32 depths, in the same straight-ray frame). Tracking results are JSON:
   `{type: 'tracks', tracks: [{seq0, seq1, t, layers, thermo}]}`.
 - At 18 swaths/s and about 60 kB each, about 1.1 MB/s per viewer, and about 300 MB for a page connecting to a full
   5000-swath history.

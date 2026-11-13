@@ -2,7 +2,11 @@
 
 # Water Column Plotter
 
-Real-time display of multibeam sonar water column data, in a web browser.
+Real-time display of multibeam sonar water column data, in a web browser. 
+
+Developed by Val Schmidt and John Hughes Clarke at the Center for Coastal and Ocean Mapping/Joint Hydrographic Center of the University of New Hampshire. (See Acknowledgements below for *many* other contributions incorporated into this effort.)
+
+![Water Column Plotter replaying a recording: pie, horizontal slice and vertical slice with thermocline tracking](docs/images/screenshot.png)
 
 Water Column Plotter receives water column datagrams from a multibeam echosounder as they're recorded, or replays a
 recorded file, and shows them in three linked views:
@@ -36,8 +40,6 @@ It can also:
 each ping's 7000 settings, 7004 beam geometry and 7027 bottom detections, and heave from 1012. Checked with a
 SeaBat T51R. They have no installation record the plotter reads, so for depths from the water surface enter the
 transducer depth in Settings, and no sound speed profile, so there is no thermocline comparison.
-
-![Water Column Plotter replaying a recording: pie, horizontal slice and vertical slice with thermocline tracking](docs/images/screenshot.png)
 
 ## Installation
 
@@ -187,6 +189,12 @@ viewing shares the same settings and data source.
 
 `wcp --help` lists them too. The plotter's own settings (cell size, sidelobe suppression, tracking and
 so on) are in the page's **Settings** panel.
+
+**Wreck detection (experimental).** The **Wreck** button finds the shallowest water column return on a target, such
+as a wreck's mast, inside a box you drag on the plots, and compares it with the sonar's own bottom detections. Its
+**Export CSV** saves the detections; with Kongsberg #MRZ soundings available (over UDP, or the `.kmall` recorded
+with a `.kmwcd`) they include latitude, longitude and depth below the waterline with an uncertainty. These are field
+estimates, not charted depths: see [Experiments](docs/experiments.md#wreck-detection).
 
 ## The original Qt version
 

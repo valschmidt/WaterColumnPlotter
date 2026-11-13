@@ -41,8 +41,11 @@ const LUTS = {
 };
 let LUT = LUTS.viridis;
 
-const SLICE_H_COLOR = 'rgba(255, 92, 220, 0.9)';   // horizontal slice band (depth)
+const SLICE_H_COLOR = 'rgba(255, 170, 60, 0.9)';   // horizontal slice band (depth)
 const SLICE_V_COLOR = 'rgba(80, 220, 255, 0.9)';   // vertical slice band (across-track)
+const WRECK_DOT = '#ff3fd0';                         // wreck detections
+const WRECK_BOX = 'rgb(160, 110, 240)';      // the wreck box (prism): violet, apart from the white pie time line
+const BOTTOM_DOT = 'rgba(200, 205, 215, 0.75)';     // the sonar's bottom detections under the wreck box
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -60,6 +63,12 @@ const state = {
   showGrid: true,
   tracking: 'thermocline',  // tracked features drawn on the vertical slice: 'off', 'layers' or 'thermocline'
   svp: null,           // {time, depth_m: [], speed_mps: []}, depths below the water surface
+  // Wreck detection (this viewer's own): a box (prism) of swaths [s0, s1] (inclusive), depths [top, bottom] and
+  // across-track [port, starboard] (m), each null until drawn; detections in it, and the sonar's bottom detections
+  // under it. See detectWreck. max: once the box is complete, the slices and pie show the strongest cell feeding each
+  // pixel, not the mean (see sliceMax).
+  wreck: { on: false, seq: null, depth: null, across: null, threshold: null, detections: [], least: null, bottoms: [],
+    bottomLeast: null, max: true },
 };
 
 // ---------------------------------------------------------------------------
@@ -429,17 +438,42 @@ class Panel {
       const hit = this.hitHandle(ev.offsetX, ev.offsetY);
       if (hit) {
         const [wx, wy] = this.toWorld(ev.offsetX, ev.offsetY), h = hit.handle;
-        handleDrag = { ...hit, start: h.axis === 'x' ? wx : wy, lo: h.lo, hi: h.hi, at: h.at };
+        handleDrag = { ...hit, start: h.axis === 'x' ? wx : wy, lo: h.lo, hi: h.hi, at: h.at, wx0: wx, wy0: wy };
+        return;
+      }
+      // Wreck mode: a drag on the plot draws a box (shift-drag still pans).
+      const p = this.plot;
+      if (this.drawBox && state.wreck.on && !ev.shiftKey && ev.offsetX >= p.x && ev.offsetX <= p.x + p.w && ev.offsetY >= p.y &&
+          ev.offsetY <= p.y + p.h) {
+        this.rubber = { x0: ev.offsetX, y0: ev.offsetY, x1: ev.offsetX, y1: ev.offsetY };
         return;
       }
       drag = { x: ev.offsetX, y: ev.offsetY, view: { ...this.view } };
     });
     c.addEventListener('pointermove', ev => {
       if (this.histDrag) { this.moveLevelDrag(ev.offsetY); return; }
+      if (this.rubber) {
+        Object.assign(this.rubber, { x1: ev.offsetX, y1: ev.offsetY });
+        this.draw();
+        return;
+      }
       if (handleDrag) {
         const [wx, wy] = this.toWorld(ev.offsetX, ev.offsetY), d = handleDrag, h = d.handle;
         const delta = (h.axis === 'x' ? wx : wy) - d.start;
-        if (h.kind === 'line') h.set(d.at + delta);
+        if (h.kind === 'box') {
+          // A box: an edge (or corner) moves only that edge, against the opposite one; inside moves it.
+          let [x0, x1] = h.x, [y0, y1] = h.y;
+          if (d.part === 'move') {
+            const dx = wx - d.wx0, dy = wy - d.wy0;
+            x0 += dx; x1 += dx; y0 += dy; y1 += dy;
+          } else {
+            if (d.part.includes('x0')) [x0, x1] = [Math.min(x1, wx), Math.max(x1, wx)];
+            else if (d.part.includes('x1')) [x0, x1] = [Math.min(x0, wx), Math.max(x0, wx)];
+            if (d.part.includes('y0')) [y0, y1] = [Math.min(y1, wy), Math.max(y1, wy)];
+            else if (d.part.includes('y1')) [y0, y1] = [Math.min(y0, wy), Math.max(y0, wy)];
+          }
+          h.set([x0, x1], [y0, y1]);
+        } else if (h.kind === 'line') h.set(d.at + delta);
         else if (d.part === 'move') h.set(d.lo + delta, d.hi + delta);
         else {
           // An edge changes the width about the band's centre, which stays put.
@@ -451,8 +485,9 @@ class Panel {
         return;
       }
       const hover = !drag && this.hitHandle(ev.offsetX, ev.offsetY);
+      // A cross-hair throughout while a wreck box is being set up, so it's clear a box (or its line) is to be dragged.
       c.style.cursor = this.inHist(ev.offsetX, ev.offsetY) ? 'ns-resize'
-        : hover ? (hover.handle.axis === 'x' ? 'ew-resize' : 'ns-resize') : 'crosshair';
+        : hover && !wreckSelecting() ? handleCursor(hover) : 'crosshair';
       if (drag) {
         const p = this.plot, v = drag.view;
         const dx = (ev.offsetX - drag.x) / p.w * (v.x1 - v.x0);
@@ -464,6 +499,16 @@ class Panel {
       this.updateReadout(ev.offsetX, ev.offsetY);
     });
     c.addEventListener('pointerup', () => {
+      if (this.rubber) {
+        const r = this.rubber;
+        this.rubber = null;
+        // A click (or a tiny drag) draws nothing.
+        if (Math.abs(r.x1 - r.x0) >= 4 || Math.abs(r.y1 - r.y0) >= 4) {
+          const [ax, ay] = this.toWorld(r.x0, r.y0), [bx, by] = this.toWorld(r.x1, r.y1);
+          this.drawBox([Math.min(ax, bx), Math.max(ax, bx)], [Math.min(ay, by), Math.max(ay, by)]);
+        }
+        this.draw();
+      }
       if (handleDrag && handleDrag.handle.done) handleDrag.handle.done();
       drag = null;
       handleDrag = null;
@@ -486,12 +531,31 @@ class Panel {
 
   // The indicator under a screen point, if any: {handle, part: 'lo' | 'hi' | 'move'}. Handles are
   // {axis: 'x' | 'y', kind: 'band', lo, hi, set(lo, hi)} (a band between two world coordinates, dragged by either
-  // edge to widen or narrow it about its centre, or by its centre line to move it) or {axis, kind: 'line', at, set(at)}; done() is called after a drag.
+  // edge to widen or narrow it about its centre, or by its centre line to move it), {axis, kind: 'line', at, set(at)},
+  // or {kind: 'box', x: [x0, x1], y: [y0, y1], set(x, y)} (a rectangle, part: 'move' inside, or the edges near the
+  // point, 'x0', 'x1', 'y0', 'y1' or a corner such as 'x1y0'; it may have no width or height: a line). done() is
+  // called after a drag.
   hitHandle(sx, sy) {
     if (!this.handles || !this.view) return null;
     const p = this.plot;
     if (sx < p.x || sx > p.x + p.w || sy < p.y || sy > p.y + p.h) return null;
+    // While a wreck box is being set up, only its own edges and lines can be grabbed: the slice bands and pie time
+    // stay put, so a drag draws the box.
+    const selecting = wreckSelecting();
     for (const h of this.handles()) {
+      if (selecting && h.kind !== 'box') continue;
+      if (h.kind === 'box') {
+        const [ax, ay] = this.toScreen(h.x[0], h.y[0]), [bx, by] = this.toScreen(h.x[1], h.y[1]), tol = 6;
+        const x0 = Math.min(ax, bx), x1 = Math.max(ax, bx), y0 = Math.min(ay, by), y1 = Math.max(ay, by);
+        if (sx < x0 - tol || sx > x1 + tol || sy < y0 - tol || sy > y1 + tol) continue;
+        const dx0 = Math.abs(sx - x0), dx1 = Math.abs(sx - x1), dy0 = Math.abs(sy - y0), dy1 = Math.abs(sy - y1);
+        let part = '';
+        if (Math.min(dx0, dx1) <= tol) part += dx0 <= dx1 ? 'x0' : 'x1';
+        if (Math.min(dy0, dy1) <= tol) part += dy0 <= dy1 ? 'y0' : 'y1';
+        if (part) return { handle: h, part };
+        if (x1 - x0 > 2 * tol && y1 - y0 > 2 * tol) return { handle: h, part: 'move' };
+        continue;
+      }
       const pos = v => (h.axis === 'x' ? this.toScreen(v, 0)[0] : this.toScreen(0, v)[1]);
       const s = h.axis === 'x' ? sx : sy;
       if (h.kind === 'line') {
@@ -644,11 +708,16 @@ class Panel {
       return;
     }
     if (sx < p.x || sx > p.x + p.w || sy < p.y || sy > p.y + p.h) { this.readout.textContent = ''; return; }
-    const hit = this.hitHandle(sx, sy);
-    if (hit && hit.handle.label) { this.readout.textContent = hit.handle.label(hit.part); return; }
+    // Where the mouse is and the value there, then what is under it, if anything: a point drawn on the plot (a wreck
+    // detection) or a draggable indicator.
     const [x, y] = this.toWorld(sx, sy);
     const v = this.valueAt(x, y);
-    this.readout.textContent = this.describe(x, y) + (Number.isFinite(v) ? `   ${v.toFixed(this.unit === 'm' ? 2 : 1)} ${this.unit}` : '');
+    const here = this.describe(x, y) + (Number.isFinite(v) ? `, ${v.toFixed(this.unit === 'm' ? 2 : 1)} ${this.unit}` : '');
+    const pointed = this.pointAt && this.pointAt(this, sx, sy);
+    const hit = !pointed && this.hitHandle(sx, sy);
+    const note = pointed || (hit && hit.handle.label && hit.handle.label(hit.part));
+    this.readout.textContent = note ? `${here} · ${note}` : here;
+    this.readout.title = this.readout.textContent;  // in full, if it doesn't fit
   }
 
   draw() {
@@ -679,6 +748,13 @@ class Panel {
     }
     if (state.showGrid) this.drawGrid();
     if (this.overlay) this.overlay(ctx, this);
+    if (this.rubber) {
+      const r = this.rubber;
+      ctx.strokeStyle = WRECK_BOX;
+      ctx.setLineDash([5, 3]);
+      ctx.strokeRect(Math.min(r.x0, r.x1) + 0.5, Math.min(r.y0, r.y1) + 0.5, Math.abs(r.x1 - r.x0), Math.abs(r.y1 - r.y0));
+      ctx.setLineDash([]);
+    }
     ctx.restore();
     this.drawAxes();
     if (this.side) this.side(ctx, this);
@@ -835,7 +911,7 @@ function pieTimeHandle() {
   if (!span) return [];
   return [{
     axis: 'x', kind: 'line', at: span[1], set: x => setPieSeq(buffer.newestSeq() + Math.round(x)),
-    label: () => `Pie: ${utc(state.pieShown.t)} UTC (drag to step through time; to the right end to follow live data)`,
+    label: () => `pie time ${utc(state.pieShown.t)}: drag to step through time`,
   }];
 }
 function drawPieTime(ctx, panel) {
@@ -855,19 +931,14 @@ const sliceHandle = (axis, which) => ({
   set: (lo, hi) => setSlice(which, lo, hi), done: saveSlices,
   label: part => {
     const [a, b] = which === 'depth' ? depthBand() : acrossBand(), how = part === 'move' ? 'drag to move' : 'drag to resize';
-    return which === 'depth' ? `Horizontal slice: ${a.toFixed(1)} to ${b.toFixed(1)} m deep (${how})`
-      : `Vertical slice: ${a.toFixed(1)} to ${b.toFixed(1)} m across (${how})`;
+    return `${which === 'depth' ? 'horizontal' : 'vertical'} slice ${a.toFixed(1)} to ${b.toFixed(1)} m: ${how}`;
   },
 });
 
-// The swath under x (swaths from the newest) on the slices, if held.
-function swathAt(x) {
-  const last = buffer.newestSeq();
-  return last === null ? null : buffer.get(last + Math.ceil(x));
-}
+// The swaths from the newest at x on the slices, and the time of the swath there if it is held.
 function describeSwath(x) {
-  const sw = swathAt(x);
-  return `${Math.max(0, Math.round(-x))} swaths ago${sw ? ' (' + utc(sw.t) + ' UTC)' : ''}`;
+  const last = buffer.newestSeq(), sw = last === null ? null : buffer.get(last + Math.ceil(x));
+  return `${Math.min(0, Math.round(x))} swaths${sw ? ', ' + utc(sw.t) + ' UTC' : ''}`;
 }
 
 const panels = {
@@ -876,13 +947,16 @@ const panels = {
     yLabel: 'Depth below transducer (m)',
     pinTop: true,
     equalAspect: true,
-    describe: (x, y) => `across ${x.toFixed(1)} m, depth ${y.toFixed(1)} m`,
+    describe: (x, y) => `across: ${x.toFixed(1)} m, depth: ${y.toFixed(1)} m`,
     overlay: (ctx, panel) => {
       if (!state.settings) return;
       band(ctx, panel, 'y', ...depthBand(), SLICE_H_COLOR);
       band(ctx, panel, 'x', ...acrossBand(), SLICE_V_COLOR);
+      drawWreck(ctx, panel);
     },
-    handles: () => state.settings ? [sliceHandle('y', 'depth'), sliceHandle('x', 'across')] : [],
+    handles: () => state.settings ? [...wreckHandle('pie'), sliceHandle('y', 'depth'), sliceHandle('x', 'across')] : [],
+    drawBox: (x, y) => setWreckBox('pie', x, y),
+    pointAt: wreckPointAt,
   }),
   horizontal: new Panel('horizontal', {
     xLabel: 'Swaths (0 = newest)',
@@ -893,30 +967,462 @@ const panels = {
       const [lo, hi] = depthBand();
       return { lo, hi };
     },
-    describe: (x, y) => `${describeSwath(x)}, across ${y.toFixed(1)} m`,
+    describe: (x, y) => `${describeSwath(x)}, across: ${y.toFixed(1)} m`,
     overlay: (ctx, panel) => {
       if (!state.settings) return;
       band(ctx, panel, 'y', ...acrossBand(), SLICE_V_COLOR);
       drawPieTime(ctx, panel);
+      drawWreck(ctx, panel);
     },
-    handles: () => state.settings ? [...pieTimeHandle(), sliceHandle('y', 'across')] : [],
+    handles: () => state.settings ? [...wreckHandle('horizontal'), ...pieTimeHandle(), sliceHandle('y', 'across')] : [],
+    drawBox: (x, y) => setWreckBox('horizontal', x, y),
+    pointAt: wreckPointAt,
   }),
   vertical: new Panel('vertical', {
     xLabel: 'Swaths (0 = newest)',
     yLabel: 'Depth below transducer (m)',
     pinTop: true,
-    describe: (x, y) => `${describeSwath(x)}, depth ${y.toFixed(1)} m`,
+    describe: (x, y) => `${describeSwath(x)}, depth: ${y.toFixed(1)} m`,
     overlay: (ctx, panel) => {
       if (!state.settings) return;
       band(ctx, panel, 'y', ...depthBand(), SLICE_H_COLOR);
       if (state.tracking === 'layers') drawLayers(ctx, panel);
       if (state.tracking === 'thermocline') drawThermocline(ctx, panel);
       drawPieTime(ctx, panel);
+      drawWreck(ctx, panel);
     },
-    handles: () => state.settings ? [...pieTimeHandle(), sliceHandle('y', 'depth')] : [],
+    handles: () => state.settings ? [...wreckHandle('vertical'), ...pieTimeHandle(), sliceHandle('y', 'depth')] : [],
+    drawBox: (x, y) => setWreckBox('vertical', x, y),
+    pointAt: wreckPointAt,
     side: drawSVP,
   }),
 };
+
+// ---------------------------------------------------------------------------
+// Experimental: wreck detection. A box (prism) drawn around a target in the three plots: swaths, depth and
+// across-track. In each column of it (one swath, one across-track cell) the shallowest cell at or above the threshold
+// is a detection, after the water column least-depth workflow of Wyllie, Weber & Armstrong (US Hydro 2015). Depths are
+// the plotter's: straight rays at the sound speed at the transducer, heave-corrected, below the transducer or the
+// surface; not corrected for refraction, water level or datum. The sonar's own bottom detections under the box are
+// compared in the same frame.
+// ---------------------------------------------------------------------------
+// The box's dimensions each plot's axes show: [x, y].
+const WRECK_HIST_BINS = 60;
+const WRECK_AXES = { vertical: ['seq', 'depth'], horizontal: ['seq', 'across'], pie: ['across', 'depth'] };
+
+function wreckComplete() { const w = state.wreck; return !!(w.seq && w.depth && w.across); }
+// Wreck mode with the box not yet complete.
+function wreckSelecting() { return state.wreck.on && !wreckComplete(); }
+
+// A dimension as a world range on a plot axis (swaths: x, swaths from the newest). One not yet set is a line where
+// the slice is (depth, across-track) or at the pie's time (swaths), to be dragged out into a box.
+function wreckRange(dim) {
+  const w = state.wreck, last = buffer.newestSeq();
+  if (dim === 'seq') {
+    if (w.seq) return last === null ? null : [w.seq[0] - last - 1, w.seq[1] - last];
+    const span = pieSpan();
+    return span ? [span[1], span[1]] : null;
+  }
+  if (w[dim]) return w[dim];
+  const [a, b] = dim === 'depth' ? depthBand() : acrossBand();
+  return [(a + b) / 2, (a + b) / 2];
+}
+
+// The box on a plot, {x, y} world ranges, once either of the dimensions it shows is set.
+function wreckBox(id) {
+  const w = state.wreck, [dx, dy] = WRECK_AXES[id];
+  if (!w.on || !state.settings || (!w[dx] && !w[dy])) return null;
+  const x = wreckRange(dx), y = wreckRange(dy);
+  return x && y ? { x, y } : null;
+}
+
+// Set the dimensions a plot shows from a box drawn or dragged on it (world ranges on its x and y axes). A dimension
+// with no size (a line not dragged out) stays unset.
+function setWreckBox(id, xr, yr) {
+  const w = state.wreck, last = buffer.newestSeq();
+  WRECK_AXES[id].forEach((dim, i) => {
+    const [lo, hi] = i === 0 ? xr : yr;
+    if (hi - lo <= 1e-9 && !w[dim]) return;
+    if (dim === 'seq') {
+      if (last === null) return;
+      // Swath n spans x (n - newest - 1, n - newest]: the swaths the range overlaps.
+      const s0 = last + Math.floor(lo + 1e-6) + 1;
+      w.seq = [s0, Math.max(s0, last + Math.ceil(hi - 1e-6))];
+    } else {
+      w[dim] = [lo, hi];
+    }
+  });
+  // A box drawn on the pie is of the swaths the pie shows, until its time span is dragged on a slice.
+  if (id === 'pie' && !w.seq && state.pieShown) w.seq = [state.pieShown.seq0, state.pieShown.seq1];
+  wreckChanged();
+}
+
+function wreckHandle(id) {
+  const box = wreckBox(id);
+  if (!box) return [];
+  return [{
+    kind: 'box', x: box.x, y: box.y, set: (x, y) => setWreckBox(id, x, y),
+    label: part => part === 'move' ? 'wreck box: drag to move' : 'wreck box: drag to resize',
+  }];
+}
+
+// Mouse cursor over a draggable indicator (see Panel.hitHandle).
+function handleCursor(hit) {
+  const h = hit.handle, part = hit.part;
+  if (h.kind !== 'box') return h.axis === 'x' ? 'ew-resize' : 'ns-resize';
+  if (part === 'move') return 'move';
+  const x = part.includes('x'), y = part.includes('y');
+  if (x && y) return part.includes('x0') === part.includes('y0') ? 'nwse-resize' : 'nesw-resize';
+  return x ? 'ew-resize' : 'ns-resize';
+}
+
+// Detections: in each column of the box (a swath's across-track cell), the shallowest cell in the box at or above the
+// threshold. Also the sonar's bottom detections under the box: in its swaths and across-track, at or below its top;
+// and the histogram of the levels of all the box's cells (see drawWreckHist).
+function detectWreck() {
+  const w = state.wreck, s = state.settings;
+  w.detections = []; w.least = null; w.bottoms = []; w.bottomLeast = null;
+  const levels = [];
+  if (w.on && wreckComplete() && s && w.threshold !== null && buffer.swaths.length) {
+    const b = s.binSize_m, sws = buffer.swaths;
+    const [r0, r1] = gridBand(w.depth), [c0, c1] = gridBand(w.across);
+    for (let i = buffer.indexAtOrBefore(w.seq[0] - 1) + 1; i < sws.length && sws[i].seq <= w.seq[1]; i++) {
+      const sw = sws[i], q = sw.q, W = sw.cols;
+      const qt = Math.ceil((w.threshold - sw.base) / sw.step - 1e-9);  // level >= threshold where q >= qt
+      const ra = Math.max(r0, sw.row0), rb = Math.min(r1, sw.row0 + sw.rows);
+      for (let c = Math.max(c0, sw.col0), ce = Math.min(c1, sw.col0 + W); c < ce; c++) {
+        let found = false;
+        for (let r = ra; r < rb; r++) {
+          const v = q[(r - sw.row0) * W + (c - sw.col0)];
+          if (v === NO_DATA) continue;
+          levels.push(sw.base + sw.step * v);
+          if (!found && v >= qt) {
+            w.detections.push({ seq: sw.seq, across: (c + 0.5) * b, depth: (r + 0.5) * b, level: sw.base + sw.step * v });
+            found = true;
+          }
+        }
+      }
+      const bt = sw.bottom;
+      for (let k = 0; bt && k < bt.across.length; k++) {
+        const a = bt.across[k], z = bt.depth[k];
+        if (a >= w.across[0] && a <= w.across[1] && z >= w.depth[0]) w.bottoms.push({ seq: sw.seq, across: a, depth: z });
+      }
+    }
+    for (const d of w.detections) {
+      if (!w.least || d.depth < w.least.depth || (d.depth === w.least.depth && d.level > w.least.level)) w.least = d;
+    }
+    for (const d of w.bottoms) if (!w.bottomLeast || d.depth < w.bottomLeast.depth) w.bottomLeast = d;
+  }
+  w.hist = null;
+  if (levels.length > 1) {
+    // Every level in the box, to half a dB beyond the strongest, so the right end leaves no detections (the plots'
+    // histograms leave out the extreme 0.2 %, which in a wreck box are the target).
+    let lo = Infinity, hi = -Infinity;
+    for (const v of levels) { if (v < lo) lo = v; if (v > hi) hi = v; }
+    // Every cell counted (histogram() samples large sets, which could miss the few strongest).
+    const h = { lo: Math.floor(lo * 2) / 2, hi: Math.floor(hi * 2) / 2 + 0.5, counts: new Float32Array(WRECK_HIST_BINS) };
+    const scale = WRECK_HIST_BINS / (h.hi - h.lo);
+    for (const v of levels) h.counts[Math.min(WRECK_HIST_BINS - 1, Math.floor((v - h.lo) * scale))]++;
+    h.max = Math.max(1, ...h.counts);
+    w.hist = h;
+  }
+  showWreck();
+}
+
+function drawWreck(ctx, panel) {
+  const w = state.wreck;
+  if (!w.on) return;
+  const id = panel.el.id, box = wreckBox(id), last = buffer.newestSeq(), sh = state.pieShown;
+  if (box) {
+    let [ax, ay] = panel.toScreen(box.x[0], box.y[0]), [bx, by] = panel.toScreen(box.x[1], box.y[1]);
+    // At least 3 px each way, and inside the plot, so a line not yet dragged out (on the newest swath, say) shows.
+    const p = panel.plot, grow = (a, b, lo, hi) => {
+      if (b - a < 3) { const m = (a + b) / 2; a = m - 1.5; b = m + 1.5; }
+      const shift = Math.min(0, hi - 1 - b) + Math.max(0, lo + 1 - a);
+      return [a + shift, b + shift];
+    };
+    [ax, bx] = grow(Math.min(ax, bx), Math.max(ax, bx), p.x, p.x + p.w);
+    [ay, by] = grow(Math.min(ay, by), Math.max(ay, by), p.y, p.y + p.h);
+    // Dashed where the plot doesn't pass through the box: the pie showing swaths outside its time span, or a slice
+    // whose band misses it (the horizontal slice's depth band, the vertical slice's across-track band).
+    const misses = (band, range) => range && (band[1] <= range[0] || band[0] >= range[1]);
+    const outside = id === 'pie' ? w.seq && sh && (sh.seq1 < w.seq[0] || sh.seq0 > w.seq[1])
+      : id === 'horizontal' ? misses(depthBand(), w.depth) : misses(acrossBand(), w.across);
+    ctx.fillStyle = 'rgba(190, 150, 255, 0.10)';
+    ctx.fillRect(ax, ay, bx - ax, by - ay);
+    // A thick line over a dark outline, so it stands out on any color of the plot.
+    ctx.setLineDash(outside ? [7, 5] : []);
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.75)';
+    ctx.lineWidth = 4.5;
+    ctx.strokeRect(ax, ay, bx - ax, by - ay);
+    ctx.strokeStyle = WRECK_BOX;
+    ctx.lineWidth = 2.5;
+    ctx.strokeRect(ax, ay, bx - ax, by - ay);
+    ctx.setLineDash([]);
+    ctx.lineWidth = 1;
+  }
+  if (last === null) return;
+  // The pie shows every swath's detections in the box, those of the swaths it shows bright, the others faint.
+  const inPie = d => id !== 'pie' || (sh && d.seq >= sh.seq0 && d.seq <= sh.seq1);
+  const dots = (list, color, size) => {
+    for (const faint of id === 'pie' ? [true, false] : [false]) {
+      ctx.globalAlpha = faint ? 0.3 : 1;
+      ctx.fillStyle = color;
+      for (const d of list) {
+        if (inPie(d) === faint) continue;
+        const [x, y] = wreckScreen(panel, d);
+        ctx.fillRect(x - size / 2, y - size / 2, size, size);
+      }
+    }
+    ctx.globalAlpha = 1;
+  };
+  dots(w.bottoms, BOTTOM_DOT, 3);
+  // Detections: small squares, as there can be thousands; the shallowest a large dot ringed in white.
+  dots(w.detections, WRECK_DOT, 3);
+  if (w.least) {
+    const [x, y] = wreckScreen(panel, w.least);
+    ctx.globalAlpha = inPie(w.least) ? 1 : 0.5;
+    ctx.fillStyle = WRECK_DOT;
+    ctx.beginPath(); ctx.arc(x, y, 6, 0, 2 * Math.PI); ctx.fill();
+    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; ctx.stroke(); ctx.lineWidth = 1;
+    ctx.globalAlpha = 1;
+  }
+}
+
+// Where a detection (or bottom detection) is drawn on a plot.
+function wreckScreen(panel, d) {
+  const [dx, dy] = WRECK_AXES[panel.el.id];
+  return panel.toScreen(dx === 'seq' ? d.seq - buffer.newestSeq() - 0.5 : d[dx], d[dy]);
+}
+
+// The readout for the detection under the mouse, if any: its depth and place in the plotter's frame, and, when the
+// sonar's #MRZ was received, its corrected position and depth (asked of the plotter, then shown when it answers).
+const wreckLocated = new Map();  // detection key -> the plotter's answer (or 'pending')
+function wreckPointAt(panel, sx, sy) {
+  const w = state.wreck;
+  panel.lastPointed = null;
+  if (!w.on || !w.detections.length || buffer.newestSeq() === null) return null;
+  let best = null, bestD = 36;  // within 6 px
+  for (const d of w.detections) {
+    const [x, y] = wreckScreen(panel, d), dist = (x - sx) ** 2 + (y - sy) ** 2;
+    if (dist <= bestD) { best = d; bestD = dist; }
+  }
+  if (!best) return null;
+  const b = state.settings.binSize_m, sw = buffer.get(best.seq);
+  const side = best.across < 0 ? `${(-best.across).toFixed(1)} m port` : `${best.across.toFixed(1)} m stbd`;
+  let text = `${best === w.least ? 'shallowest' : 'detection'} ${best.depth.toFixed(2)} ±${(b / 2).toFixed(2)} m, ` +
+    `${side}, ${best.level.toFixed(1)} dB${sw ? ', ' + utc(sw.t) : ''}`;
+  const key = `${best.seq}:${best.across}:${best.depth}`, found = wreckLocated.get(key);
+  if (found === undefined) {
+    wreckLocated.set(key, 'pending');
+    fetch('/wreck/locate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ seq: best.seq, across: best.across, depth: best.depth }) })
+      .then(r => r.json()).then(p => {
+        wreckLocated.set(key, p);
+        if (panel.lastPointed === key) panel.updateReadout(sx, sy);
+      }).catch(() => wreckLocated.delete(key));
+  } else if (found && found.lat !== undefined) {
+    const lat = `${Math.abs(found.lat).toFixed(6)}° ${found.lat < 0 ? 'S' : 'N'}`;
+    const lon = `${Math.abs(found.lon).toFixed(6)}° ${found.lon < 0 ? 'W' : 'E'}`;
+    text += `; corrected ${found.depth_wl.toFixed(2)} ±${found.u_vert.toFixed(2)} m below WL, ${lat} ${lon}`;
+  }
+  panel.lastPointed = key;
+  return text;
+}
+
+const wreckBar = document.getElementById('wreck-bar'), wreckToggle = document.getElementById('wreck-toggle');
+const wreckEl = {
+  help: document.getElementById('wreck-help'), threshold: document.getElementById('wreck-threshold'),
+  hist: document.getElementById('wreck-hist'), result: document.getElementById('wreck-result'),
+  clear: document.getElementById('wreck-clear'), exportButton: document.getElementById('wreck-export'),
+  geo: document.getElementById('wreck-geo'),
+};
+
+// Whether exports can have coordinates: swaths paired with the sonar's #MRZ soundings (Kongsberg; when replaying a
+// .kmwcd, from the .kmall recorded with it).
+function showWreckGeo(stats) {
+  const n = stats.georeferenced ?? 0, file = source.mode === 'replay' ? source.replay?.mrz : null;
+  wreckEl.geo.classList.toggle('ok', n > 0);
+  wreckEl.geo.textContent = n > 0 ? 'Coords ✓' : 'No coords';
+  wreckEl.geo.title = n > 0
+    ? `The export gives each detection a position and a depth below the waterline, corrected from the sonar's own ` +
+      `bottom detections of its beam (#MRZ${file ? ' in ' + file : ''}), with an uncertainty. Not corrected for ` +
+      'tide, datum or separation model; real-time navigation.'
+    : 'The sonar\'s #MRZ soundings haven\'t been received, so the export gives sonar-relative positions only (with ' +
+      'time, beam angle and range for processing software). Kongsberg only: over UDP, or when replaying a .kmwcd, from ' +
+      'the .kmall of the same name (in the same directory, the one above, or one beside it).';
+}
+
+function wreckChanged() {
+  detectWreck();
+  // The plots switch between mean and strongest (sliceMax) when the box is set or cleared, or Max is changed.
+  const max = sliceMax();
+  if (max !== shownMax) {
+    shownMax = max;
+    for (const p of Object.values(panels)) p.resetLevels();  // the strongest are on a different scale
+    scheduleRebuild();
+  }
+  for (const p of Object.values(panels)) p.draw();
+}
+
+// Whether the slices and pie show the strongest cell feeding each pixel (wreck mode, the box complete and Strongest
+// chosen), rather than the mean. Where the slice bands cover the box, every detection then sits on a pixel at least as
+// strong as the threshold.
+function sliceMax() { const w = state.wreck; return w.on && wreckComplete() && w.max; }
+let shownMax = false;
+
+function clearWreck() {
+  Object.assign(state.wreck, { seq: null, depth: null, across: null, detections: [], least: null, bottoms: [],
+    bottomLeast: null, hist: null });
+  wreckLocated.clear();
+  showWreck();
+}
+
+function setWreckMode(on) {
+  const w = state.wreck;
+  w.on = on;
+  wreckToggle.setAttribute('aria-pressed', String(on));
+  wreckBar.hidden = !on;
+  if (!on) clearWreck();  // leaving wreck mode removes the box and its detections
+  // The threshold starts at the top of the pie's color scale.
+  if (on && w.threshold === null) setWreckThreshold(panels.pie.levels ? Math.round(panels.pie.levels[1] * 2) / 2 : 0);
+  wreckChanged();
+}
+wreckToggle.addEventListener('click', () => setWreckMode(!state.wreck.on));
+
+function setWreckThreshold(v) {
+  if (!Number.isFinite(v)) return;
+  state.wreck.threshold = v;
+  if (document.activeElement !== wreckEl.threshold) wreckEl.threshold.value = v;
+  wreckChanged();
+}
+wreckEl.threshold.addEventListener('input', () => setWreckThreshold(parseFloat(wreckEl.threshold.value)));
+document.getElementById('wreck-plots').addEventListener('change', ev => {
+  state.wreck.max = ev.target.value === 'max';
+  wreckChanged();
+});
+
+// The histogram of the levels in the box, beside the threshold: bars at and above the threshold pink. The threshold is
+// the white line, dragged (or clicked) to set it. Its range follows the box's levels, widened to show the threshold.
+function wreckHistRange() {
+  const h = state.wreck.hist, t = state.wreck.threshold;
+  if (!h) return null;
+  return { lo: Math.min(h.lo, t ?? h.lo), hi: Math.max(h.hi, t ?? h.hi) };
+}
+function drawWreckHist() {
+  const c = wreckEl.hist, dpr = window.devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
+  if (!W || !H) return;
+  if (c.width !== Math.round(W * dpr) || c.height !== Math.round(H * dpr)) {
+    c.width = Math.round(W * dpr); c.height = Math.round(H * dpr);
+  }
+  const ctx = c.getContext('2d'), w = state.wreck, h = w.hist, range = wreckHistRange();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+  ctx.fillRect(0, 0, W, H);
+  if (!h) {
+    ctx.fillStyle = '#9aa1ad';
+    ctx.font = '10px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('levels in the box', W / 2, H / 2);
+    return;
+  }
+  const xOf = v => (v - range.lo) / (range.hi - range.lo) * W;
+  // Square-root counts, so the few strong cells of a target show beside the many of the background.
+  const top = Math.sqrt(h.max), binW = (h.hi - h.lo) / h.counts.length;
+  h.counts.forEach((n, i) => {
+    if (!n) return;
+    const v0 = h.lo + i * binW, x0 = xOf(v0), x1 = xOf(v0 + binW), bh = Math.max(1, Math.sqrt(n) / top * (H - 2));
+    ctx.fillStyle = v0 + binW > w.threshold ? WRECK_DOT : '#8a909c';
+    ctx.fillRect(x0, H - bh, Math.max(1, x1 - x0 - 0.5), bh);
+  });
+  const x = xOf(w.threshold);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(Math.round(x) - 1, 0, 2, H);
+}
+{
+  let dragging = false;
+  const setFrom = ev => {
+    const range = wreckHistRange();
+    if (!range) return;
+    const r = wreckEl.hist.getBoundingClientRect();
+    const v = range.lo + Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)) * (range.hi - range.lo);
+    setWreckThreshold(Math.round(v * 2) / 2);
+  };
+  wreckEl.hist.addEventListener('pointerdown', ev => { dragging = true; wreckEl.hist.setPointerCapture(ev.pointerId); setFrom(ev); });
+  wreckEl.hist.addEventListener('pointermove', ev => { if (dragging) setFrom(ev); });
+  wreckEl.hist.addEventListener('pointerup', () => { dragging = false; });
+}
+wreckEl.clear.addEventListener('click', () => { clearWreck(); wreckChanged(); });
+wreckEl.exportButton.addEventListener('click', () => exportWreck());
+
+// "re transducer" or "re surface": what the plotted depths are measured from.
+function depthRef() {
+  return state.settings && state.settings.referenceToSurface ? 'below surface' : 'below transducer';
+}
+
+function showWreck() {
+  const w = state.wreck, s = state.settings;
+  const missing = [];
+  if (!w.seq) missing.push('time');
+  if (!w.depth) missing.push('depth');
+  if (!w.across) missing.push('across-track');
+  wreckEl.help.textContent = !missing.length ? ''
+    : w.seq || w.depth || w.across ? `Drag the violet line out to set ${missing.join(' and ')}`
+    : 'Drag a box around the target on any plot';
+  wreckEl.exportButton.disabled = !w.detections.length;
+  drawWreckHist();
+  if (!wreckComplete() || !s) { wreckEl.result.textContent = wreckEl.result.title = ''; return; }
+  if (!w.detections.length) {
+    wreckEl.result.textContent = 'No detections';
+    wreckEl.result.title = 'No cells in the box at or above the threshold';
+    return;
+  }
+  const b = s.binSize_m, d = w.least, sw = buffer.get(d.seq);
+  const side = d.across < 0 ? `${(-d.across).toFixed(1)} m port` : `${d.across.toFixed(1)} m stbd`;
+  let text = `Shallowest ${d.depth.toFixed(2)} ±${(b / 2).toFixed(2)} m`;
+  let full = `${w.detections.length} detections. WC shallowest ${d.depth.toFixed(2)} m ${depthRef()} (cell ` +
+    `${(d.depth - b / 2).toFixed(2)}–${(d.depth + b / 2).toFixed(2)}), ${side}${sw ? ', ' + utc(sw.t) + ' UTC' : ''}.`;
+  if (w.bottomLeast) {
+    const diff = w.bottomLeast.depth - d.depth;
+    text += ` · bottom det. ${w.bottomLeast.depth.toFixed(2)} m (${diff >= 0 ? '+' : '−'}${Math.abs(diff).toFixed(2)})`;
+    full += ` Sonar bottom detections in the box: shallowest ${w.bottomLeast.depth.toFixed(2)} m, ` +
+      `${Math.abs(diff).toFixed(2)} m ${diff >= 0 ? 'deeper' : 'shallower'}.`;
+  } else {
+    full += ' No sonar bottom detections under the box.';
+  }
+  wreckEl.result.textContent = text;
+  wreckEl.result.title = `${full}\n\nWC shallowest: the shallowest detection, at its cell's centre (the cell's ` +
+    "extent in brackets). Sonar bottom detections in box: the shallowest of the sonar's own bottom detections (gray) " +
+    "in the box's swaths and across-track, at or below its top, in the same frame. The difference shows how much " +
+    'shoaler the water column is than the bathymetry. On flat seafloor the threshold finds the leading edge of the ' +
+    'echo, a little above the bottom detections: check it there first.';
+}
+
+async function exportWreck() {
+  const w = state.wreck, r = (v, n) => +v.toFixed(n);
+  const body = {
+    prism: { seq: w.seq, depth: w.depth.map(v => r(v, 3)), across: w.across.map(v => r(v, 3)) },
+    threshold_dB: w.threshold,
+    detections: w.detections.map(d => ({ seq: d.seq, across: r(d.across, 3), depth: r(d.depth, 3), level: r(d.level, 2) })),
+    bottomLeast: w.bottomLeast && { seq: w.bottomLeast.seq, across: r(w.bottomLeast.across, 3), depth: r(w.bottomLeast.depth, 3) },
+  };
+  try {
+    const res = await fetch('/wreck/export', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const name = (res.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/)?.[1] || 'wreck.csv';
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(await res.blob()), download: name });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  } catch (e) {
+    wreckEl.result.textContent = `Export failed: ${e.message}`;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Experimental: tracked layers and the sound speed profile on the vertical slice
@@ -1111,7 +1617,9 @@ function drawSVP(ctx, panel) {
 // ---------------------------------------------------------------------------
 const NO_DATA = 255;
 const buffer = {
-  swaths: [],  // oldest first: {seq, t, ping, pos, row0, col0, rows, cols, base, step, q}, plus cached band sums
+  // Oldest first: {seq, t, ping, pos, row0, col0, rows, cols, base, step, q, nb, bottom: {across, depth}, size}, plus
+  // cached band sums. size: bytes held (grid and bottom detections).
+  swaths: [],
   bytes: 0,
   newestSeq() { return this.swaths.length ? this.swaths[this.swaths.length - 1].seq : null; },
   oldestSeq() { return this.swaths.length ? this.swaths[0].seq : null; },
@@ -1130,15 +1638,15 @@ const buffer = {
   },
   add(sw) {
     this.swaths.push(sw);
-    this.bytes += sw.q.length;
+    this.bytes += sw.size;
   },
   // Keep the newest swaths within both the swath history and its memory budget (the plotter keeps the same);
   // tracking results go with the swaths they cover.
   trim() {
     const s = state.settings, max = s ? s.historySwaths : Infinity, budget = s ? s.historyMemory_MB * 1e6 : Infinity;
     let drop = Math.max(0, this.swaths.length - max), bytes = this.bytes;
-    for (let i = 0; i < drop; i++) bytes -= this.swaths[i].q.length;
-    while (drop < this.swaths.length && bytes > budget) bytes -= this.swaths[drop++].q.length;
+    for (let i = 0; i < drop; i++) bytes -= this.swaths[i].size;
+    while (drop < this.swaths.length && bytes > budget) bytes -= this.swaths[drop++].size;
     if (drop) { this.swaths.splice(0, drop); this.bytes = bytes; }
     // Whether the memory budget, not the swath count, is what limits the history.
     this.memoryLimited = !!s && this.swaths.length < max && this.swaths.length > 0 &&
@@ -1154,15 +1662,20 @@ const buffer = {
 function swathVertical(sw, c0, c1) {
   const key = `${c0}:${c1}`;
   if (sw.v && sw.v.key === key) return sw.v;
-  const sum = new Float32Array(sw.rows), n = new Uint16Array(sw.rows);
+  // max: the strongest cell's level in each row (for the slices' Max, see sliceMax).
+  const sum = new Float32Array(sw.rows), n = new Uint16Array(sw.rows), max = new Float32Array(sw.rows);
   const a = Math.max(c0, sw.col0) - sw.col0, b = Math.min(c1, sw.col0 + sw.cols) - sw.col0, q = sw.q, W = sw.cols;
   for (let r = 0; b > a && r < sw.rows; r++) {
-    let acc = 0, k = 0;
-    for (let i = r * W + a, end = r * W + b; i < end; i++) { const v = q[i]; if (v !== NO_DATA) { acc += v; k++; } }
+    let acc = 0, k = 0, m = -1;
+    for (let i = r * W + a, end = r * W + b; i < end; i++) {
+      const v = q[i];
+      if (v !== NO_DATA) { acc += v; k++; if (v > m) m = v; }
+    }
     sum[r] = k * sw.base + sw.step * acc;
     n[r] = k;
+    max[r] = k ? sw.base + sw.step * m : NaN;
   }
-  return (sw.v = { key, sum, n });
+  return (sw.v = { key, sum, n, max });
 }
 
 // First and last row with data in each column of a swath (-1 where none).
@@ -1187,6 +1700,7 @@ function swathHorizontal(sw, r0, r1, bin, depthMode) {
   const key = `${r0}:${r1}:${bin}:${depthMode}`;
   if (sw.h && sw.h.key === key) return sw.h;
   const C = sw.cols, sum = new Float32Array(C), n = new Uint16Array(C), zw = new Float32Array(C), w = new Float32Array(C);
+  const max = new Int16Array(C).fill(-1);  // the strongest cell's q in each column
   const a = Math.max(r0, sw.row0) - sw.row0, b = Math.min(r1, sw.row0 + sw.rows) - sw.row0, q = sw.q;
   const whole = depthMode && r0 >= sw.row0 && r1 <= sw.row0 + sw.rows;
   let rows = null, amp = null;
@@ -1201,11 +1715,13 @@ function swathHorizontal(sw, r0, r1, bin, depthMode) {
       if (v === NO_DATA) continue;
       sum[c] += v;
       n[c]++;
+      if (v > max[c]) max[c] = v;
       if (whole && rows.first[c] <= a && rows.last[c] >= b - 1) { const A = amp[v]; zw[c] += A * z; w[c] += A; }
     }
   }
   for (let c = 0; c < C; c++) sum[c] = n[c] * sw.base + sw.step * sum[c];
-  return (sw.h = { key, sum, n, zw, w });
+  const maxLevel = Float32Array.from(max, v => v < 0 ? NaN : sw.base + sw.step * v);
+  return (sw.h = { key, sum, n, zw, w, max: maxLevel });
 }
 
 // A slice image from the buffer: which 'v' (rows: depth) or 'h' (rows: across-track). Its columns are the groups of
@@ -1224,16 +1740,25 @@ function buildSlice(which) {
   }
   const g0 = Math.floor(sw[0].seq / A), g1 = Math.floor(sw[sw.length - 1].seq / A), W = g1 - g0 + 1, H = hi - lo;
   const num = new Float32Array(W * H), den = new Float32Array(W * H);
+  const useMax = !depth && sliceMax(), best = useMax ? new Float32Array(W * H).fill(NaN) : null;
   for (const w of sw) {
     const c = which === 'v' ? swathVertical(w, i0, i1) : swathHorizontal(w, i0, i1, bin, depth);
     const top = depth ? c.zw : c.sum, bottom = depth ? c.w : c.n;
     const g = Math.floor(w.seq / A) - g0, off = (which === 'v' ? w.row0 : w.col0) - lo;
+    if (useMax) {
+      // The strongest cell over the band and the column's swaths.
+      for (let i = 0; i < c.max.length; i++) {
+        const v = c.max[i], k = (off + i) * W + g;
+        if (v > best[k] || (Number.isNaN(best[k]) && !Number.isNaN(v))) best[k] = v;
+      }
+      continue;
+    }
     for (let i = 0; i < top.length; i++) {
       if (bottom[i] > 0) { const k = (off + i) * W + g; num[k] += top[i]; den[k] += bottom[i]; }
     }
   }
-  const data = new Float32Array(W * H);
-  for (let k = 0; k < data.length; k++) data[k] = den[k] > 0 ? num[k] / den[k] : NaN;
+  const data = useMax ? best : new Float32Array(W * H);
+  if (!useMax) for (let k = 0; k < data.length; k++) data[k] = den[k] > 0 ? num[k] / den[k] : NaN;
   const last = sw[sw.length - 1].seq;
   return { data, W, H, lo, g0, x0: g0 * A - last - 1, x1: (g1 + 1) * A - last - 1 };
 }
@@ -1288,18 +1813,23 @@ function updatePie() {
     c0 = Math.min(c0, w.col0); c1 = Math.max(c1, w.col0 + w.cols);
   }
   const W = c1 - c0, H = r1 - r0, num = new Float32Array(W * H), den = new Uint16Array(W * H);
+  const useMax = sliceMax();  // the strongest of the swaths in each cell, not their mean
+  if (useMax) num.fill(-Infinity);
   for (const w of group) {
     const q = w.q;
     for (let r = 0; r < w.rows; r++) {
       const k0 = (w.row0 - r0 + r) * W + (w.col0 - c0), i0r = r * w.cols;
       for (let c = 0; c < w.cols; c++) {
         const v = q[i0r + c];
-        if (v !== NO_DATA) { num[k0 + c] += w.base + w.step * v; den[k0 + c]++; }
+        if (v === NO_DATA) continue;
+        const level = w.base + w.step * v;
+        if (useMax) { if (level > num[k0 + c]) num[k0 + c] = level; } else num[k0 + c] += level;
+        den[k0 + c]++;
       }
     }
   }
   const data = new Float32Array(W * H);
-  for (let k = 0; k < data.length; k++) data[k] = den[k] ? num[k] / den[k] : NaN;
+  for (let k = 0; k < data.length; k++) data[k] = den[k] ? (useMax ? num[k] : num[k] / den[k]) : NaN;
   state.pieShown = { seq0: group[0].seq, seq1, t: group[group.length - 1].t };
   const b = s.binSize_m, x0 = c0 * b, y0 = r0 * b, x1 = c1 * b, y1 = r1 * b;
   panels.pie.setImage({ w: W, h: H, data, x0, x1, y0, y1, ci0: c0, ri0: r0, extent: { x0, x1, y0, y1 } });
@@ -1334,6 +1864,7 @@ function scheduleRebuild(parts = { v: true, h: true, pie: true }) {
       const slices = ['v', 'h'].filter(k => r[k]);
       if (slices.length) updateSlices(slices);
       if (r.pie) updatePie();
+      if (state.wreck.on) detectWreck();  // new swaths may be in the box
       for (const p of Object.values(panels)) p.draw();  // indicators drawn on the others
     });
   }
@@ -1373,6 +1904,7 @@ function resetData() {
   state.tracks = [];
   state.pieSeq = null;
   state.pieShown = null;
+  clearWreck();  // swaths are numbered from 0 again
   showPieTime();
   for (const p of Object.values(panels)) {
     p.levels = null;
@@ -1729,6 +2261,7 @@ aboutDialog.addEventListener('click', ev => { if (ev.target === aboutDialog) abo
 const statusEl = document.getElementById('status');
 let lastStats = null;
 function showStats(stats) {
+  showWreckGeo(stats);
   const now = performance.now();
   // Rate of datagrams received live, or processed from the file being replayed.
   const replaying = source.mode === 'replay';
@@ -1775,15 +2308,19 @@ function send(msg) {
 }
 
 function handleBinary(buf) {
-  // uint32 header length, JSON header, then each swath's rows x cols bytes in turn.
+  // uint32 header length, JSON header, then each swath's bytes in turn: rows x cols grid bytes, then nb float32
+  // bottom detection across-track values and nb depths.
   const headerLen = new DataView(buf).getUint32(0, true);
   const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, headerLen)));
   if (header.type !== 'swaths') return;
   let pos = 4 + headerLen;
   for (const meta of header.swaths) {
-    const size = meta.rows * meta.cols;
-    buffer.add({ ...meta, q: new Uint8Array(buf, pos, size) });
-    pos += size;
+    const cells = meta.rows * meta.cols, nb = meta.nb || 0;
+    // Copied (slice) so the floats are aligned.
+    const b = new Float32Array(buf.slice(pos + cells, pos + cells + 8 * nb));
+    buffer.add({ ...meta, q: new Uint8Array(buf, pos, cells), bottom: { across: b.subarray(0, nb), depth: b.subarray(nb) },
+      size: cells + 8 * nb });
+    pos += cells + 8 * nb;
   }
   buffer.trim();
   scheduleRebuild();

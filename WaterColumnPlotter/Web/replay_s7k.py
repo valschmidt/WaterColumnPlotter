@@ -37,6 +37,7 @@ class S7kReplay(Replay):
         self.playing = True
         self.speed = 1.0  # data seconds per second; 0: as fast as possible
         self.anchor = None  # (wall clock, data time) that pacing is measured from
+        self.mrz_source = None  # no #MRZ soundings: wreck detections get no coordinates
 
     def close(self):
         self.s7k.closeFile()
