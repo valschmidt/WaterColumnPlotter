@@ -2,5 +2,5 @@
 # "pip install -e ." installs these; add ".[gui]" for the original Qt GUI's (PyQt5, pyqtgraph).
 aiohttp>=3.9
 numpy>=2.0
-pykmall>=1.1.2
+pykmall>=1.1.3
 pys7k>=0.1.0

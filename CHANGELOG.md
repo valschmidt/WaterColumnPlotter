@@ -8,7 +8,12 @@ prototype, so changes are listed by date rather than version number.
 
 ## Unreleased
 
-Nothing yet.
+### Changed
+- **Faster Kongsberg processing, so real-time data keeps up.** Water Column Plotter now needs pykmall 1.1.3, which
+  reads water column samples as arrays instead of one number at a time, and the median sidelobe suppression options
+  are a little faster; the results are exactly the same. An EM 2040 datagram of 256 beams now takes about 10 ms with
+  sidelobe suppression off and 20 to 35 ms with it on, down from 37 to 73 ms. At 21 datagrams a second that was more
+  time than there was, so datagrams were dropped. To update an existing install, run `pip install --upgrade pykmall`.
 
 ## 2026-11-13
 

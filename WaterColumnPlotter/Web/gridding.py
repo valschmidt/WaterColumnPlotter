@@ -13,7 +13,6 @@ column, so no grid size has to be chosen and no samples are dropped.
 """
 
 import collections
-import itertools
 
 import numpy as np
 
@@ -195,9 +194,9 @@ def grid_mwc(dg, bin_size, depth_offset=0.0, sidelobe_suppression='off', backgro
         np.asarray(beam['detectedRangeInSamples'], dtype=np.int64), start, num_samples)
     beam_index, sample_number = sample_indices(n_use, start)
 
-    amplitudes = np.fromiter(itertools.chain.from_iterable(s[:k] for s, k in zip(beam['sampleAmplitude05dB_p'], n_use)),
-                             dtype=np.float32, count=len(beam_index))
-    amplitudes = amplitudes * 0.5 - dg['rxInfo']['TVGoffset_dB']
+    # pykmall reads each beam's samples as an int8 array.
+    amplitudes = np.concatenate([a[:k] for a, k in zip(beam['sampleAmplitude05dB_p'], n_use)])
+    amplitudes = amplitudes * np.float32(0.5) - np.float32(dg['rxInfo']['TVGoffset_dB'])
 
     if sidelobe_suppression in kongsberg.OPTIONS:
         amplitudes = kongsberg.suppress_sidelobes(dg, sidelobe_suppression, amplitudes, beam_index, sample_number,

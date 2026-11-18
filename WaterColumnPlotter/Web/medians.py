@@ -24,9 +24,20 @@ def across_beam_median(values, beam_index, sample_number, group=None):
     """
     s = sample_number - sample_number.min()
     n = int(s.max()) + 1
-    row = s if group is None else (group - group.min()) * n + s  # one table row per (group,) range sample
+    if group is None:
+        row, col = s, beam_index - beam_index.min()
+    else:
+        g = group - group.min()
+        row = g * n + s  # one table row per (group, range sample)
+        # Each beam's column counts from its group's first beam, so the table is one group wide, not the whole swath.
+        beams = np.flatnonzero(np.bincount(beam_index))  # beams with samples, ascending
+        beam_group = np.zeros(int(beams[-1]) + 1, dtype=np.int64)
+        beam_group[beam_index] = g
+        first = np.full(int(g.max()) + 1, np.iinfo(np.int64).max)
+        np.minimum.at(first, beam_group[beams], beams)
+        col = beam_index - first[g]
     counts = np.bincount(row, minlength=int(row.max()) + 1)
-    return sorted_median(values, row, beam_index, counts)[row]
+    return sorted_median(values, row, col, counts)[row]
 
 
 def per_beam_split_median(values, beam_index, sample_number, split_sample):
