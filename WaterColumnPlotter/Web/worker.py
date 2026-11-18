@@ -39,9 +39,11 @@ logger = logging.getLogger(__name__)
 # Thermocline tracking: a cast is compared with the picks that follow it if it arrived within this long of being
 # taken, using the median of this many picks as the reference.
 CAST_RECENT_S = 600.0
-# Ping rate: measured over this many recent ping cycles; restarted after a gap longer than this.
+# Ping rate: measured over this many recent ping cycles processed; restarted after a gap longer than this, or a jump in
+# ping number of more than MAX_PING_STEP (a new source, a seek, or the ping counter wrapping round).
 PING_RATE_PINGS = 21
 MAX_PING_GAP_S = 5.0
+MAX_PING_STEP = 1000
 CALIBRATION_PICKS = 10
 # A swath is complete when the next one starts; if no datagram has arrived for this long, it is taken as complete.
 SWATH_IDLE_S = 0.5
@@ -109,22 +111,28 @@ class Worker:
         self.svp = None  # latest cast: {'depth', 'speed', 'top', 'bottom'} (depths below the surface)
         self.stats = {'processed': 0, 'empty_ping': 0, 'no_background': 0, 'grid_too_large': 0, 'swath_skipped': 0, 'process_ms': 0.0,
                       'ping_rate_hz': None, 'swaths_per_ping': None}
-        self.ping_times = collections.deque(maxlen=PING_RATE_PINGS)  # (pingCnt, time) of recent ping cycles
+        # Recent ping cycles processed: (ping number, time, ping cycles since the measurement started).
+        self.ping_times = collections.deque(maxlen=PING_RATE_PINGS)
         self.reset()
 
     def note_ping(self, ping, t, swaths_per_ping):
         """
         Track the sonar's ping rate from the data's timestamps (the recorded rate when replaying, whatever the speed).
-        Each ping cycle (ping number) counts once, however many swaths and receive heads it has.
+        Each ping cycle (ping number) counts once, however many swaths and receive heads it has. Ping cycles are
+        counted from the ping numbers, so pings dropped because processing fell behind still count: this is the
+        sonar's rate, not the rate processed.
         """
         last = self.ping_times[-1] if self.ping_times else None
         if last and last[0] == ping:
             return
-        if last and not 0 < t - last[1] < MAX_PING_GAP_S:
-            self.ping_times.clear()  # a gap, a seek or a new source
-        self.ping_times.append((ping, t))
-        span = self.ping_times[-1][1] - self.ping_times[0][1]
-        self.stats['ping_rate_hz'] = (len(self.ping_times) - 1) / span if span > 0 else None
+        step = ping - last[0] if last else 0
+        if last and not (0 < t - last[1] < MAX_PING_GAP_S and 0 < step <= MAX_PING_STEP):
+            self.ping_times.clear()  # a gap, a seek, a new source or the counter wrapping round
+            last, step = None, 0
+        self.ping_times.append((ping, t, (last[2] + step) if last else 0))
+        first, newest = self.ping_times[0], self.ping_times[-1]
+        span = newest[1] - first[1]
+        self.stats['ping_rate_hz'] = (newest[2] - first[2]) / span if span > 0 else None
         self.stats['swaths_per_ping'] = swaths_per_ping
 
     def reset(self):
@@ -396,14 +404,14 @@ class Worker:
         self.stats['processed'] += 1
         self.stats['process_ms'] = 0.9 * self.stats['process_ms'] + 0.1 * 1e3 * (time.perf_counter() - t0)
 
-    def take_update(self, receiver_stats):
+    def take_update(self):
         if self.current is not None and time.monotonic() - self.last_datagram > SWATH_IDLE_S:
             self.finish_swath()  # no more data coming (paused, or the end of a file)
         swaths, self.new_swaths = self.new_swaths, []
         tracks, self.new_tracks = self.new_tracks, []
         geo, self.new_geo = self.new_geo, []
         return {'type': 'update', 'swaths': swaths, 'tracks': tracks, 'geo': geo,
-                'stats': {**receiver_stats, **self.stats}}
+                'stats': dict(self.stats)}
 
 
 def handle_datagram(worker, item, out_queue):
@@ -535,7 +543,6 @@ def run(settings, in_queue, settings_queue, control_queue, out_queue, update_int
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(levelname)s: %(message)s')
     worker = Worker(settings)
     source = Source(worker, out_queue)
-    receiver_stats = {}
     next_update = time.monotonic() + update_interval
     while True:
         try:
@@ -572,9 +579,7 @@ def run(settings, in_queue, settings_queue, control_queue, out_queue, update_int
 
         try:
             item = in_queue.get(timeout=max(0.0, wait_until - time.monotonic()))
-            if isinstance(item, tuple):
-                receiver_stats = item[1]
-            elif source.mode == 'realtime':
+            if source.mode == 'realtime':
                 handle_datagram(worker, item, out_queue)
             else:  # replaying: live data is ignored
                 worker.stats['live_ignored'] = worker.stats.get('live_ignored', 0) + 1
@@ -584,7 +589,7 @@ def run(settings, in_queue, settings_queue, control_queue, out_queue, update_int
             logger.exception("Failed to process datagram")
 
         if time.monotonic() >= next_update:
-            out_queue.put(worker.take_update(receiver_stats))
+            out_queue.put(worker.take_update())
             if source.replay is not None:
                 out_queue.put(source.status())
             next_update = time.monotonic() + update_interval

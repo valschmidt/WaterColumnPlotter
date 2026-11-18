@@ -177,8 +177,9 @@ so the history is also limited by memory:
 - Axes in metres (depth, across-track) and pings (newest = 0 at the right; each column spans the along-track
   average). The Qt version's axes were in bin
   indices, which made a 10 m slice read as about 50.
-- Color scale: an "Auto levels" checkbox (on by default) keeps each panel at the 10th to 90th percentile of its data,
-  smoothed so colors don't jump between updates. Setting a level by hand (histogram or min/max inputs) turns it off.
+- Color scale: an "Auto levels" checkbox (on by default) keeps each panel between two percentiles of its data,
+  smoothed so colors don't jump between updates. They default to the 2nd and 98th, and can be set separately for the
+  pie and the slices in Settings, Display (kept in the browser). Setting a level by hand (histogram or min/max inputs) turns it off.
 - Each panel has a histogram of its values beside a color bar, with draggable minimum and maximum lines (drag the band
   between them to move both). The histogram's value range is fixed when data first arrives, so it doesn't shift with
   each update; it widens only if a level is set outside it. Double-clicking the histogram resets its range and levels.

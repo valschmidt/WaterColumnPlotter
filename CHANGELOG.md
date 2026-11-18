@@ -13,11 +13,41 @@ Nothing yet.
 ## 2026-11-18
 
 ### Changed
+- **Auto levels spans more of the data, and can be adjusted.** The color scale now runs from the 2nd to the 98th
+  percentile of each plot's data, instead of the 10th to the 90th, so fewer cells are saturated at the top and weaker
+  signals show at the bottom. On the EM 2040 test files this raises the top of the scale by 15 to 25 dB and lowers
+  the bottom by about 3 to 9 dB. Both percentiles can be changed in **Settings**, under Display, separately for the
+  pie and the slices; they apply at once, to you only, and are kept in your browser.
+- **Wreck detection: once the box is drawn, the plots pan and zoom as usual.** Dragging outside the box pans the
+  plot, rather than drawing a new box, so you can fine-tune the view around the target without losing the box by
+  accident. Drag the box to move it, or its edges to resize it; the slice lines and bands can be dragged too, inside
+  the box as well as outside it. Press Esc (or Clear box) to remove the box and draw a new one.
+- **Wreck detection: the sonar's soundings are green, under the detections.** Its own bottom detections in the box
+  are now drawn as green dots, outlined in black so they show on any color scale, a little larger than the magenta
+  detections and beneath them. Where a sounding and a detection coincide, the detection has a green edge, so you can
+  see whether your threshold finds the target shallower or deeper than the sonar did. On the horizontal slice only
+  the soundings within the box's depths are shown; before, every sounding under the box was drawn there in gray,
+  mostly seafloor, covering the box.
+- **Shorter status line.** It now reads, for example, "PR: 9.3 Hz × 2 swaths · 19.8 dgms/s · rcvd 446 · dropped
+  0 behind, 0 incomplete · 43 ms/dgm · 1200 swaths (310 MB)", with the ping rate (PR) in hertz. Hover over it for
+  the whole line, if it is cut short, and what each part means.
 - **Faster Kongsberg processing, so real-time data keeps up.** Water Column Plotter now needs pykmall 1.1.3, which
   reads water column samples as arrays instead of one number at a time, and the median sidelobe suppression options
   are a little faster; the results are exactly the same. An EM 2040 datagram of 256 beams now takes about 10 ms with
   sidelobe suppression off and 20 to 35 ms with it on, down from 37 to 73 ms. At 21 datagrams a second that was more
   time than there was, so datagrams were dropped. To update an existing install, run `pip install --upgrade pykmall`.
+
+### Fixed
+- **Dropped datagrams are always counted on the status line.** "dropped … behind" counts datagrams dropped because
+  processing couldn't keep up, alongside those dropped because some of their packets never arrived ("incomplete").
+  Before, the first only showed while it was increasing.
+- **"No data arriving" no longer shows while data is arriving.** It now shows only after 3 seconds with no water
+  column datagram, timed by the receiver itself. Before, the page worked it out from how the received count changed
+  between updates, so it appeared at random when an update came before the receiver's next count, and whenever
+  processing fell behind, because the counts were then held up behind the waiting data.
+- **The ping rate is the sonar's, even when processing falls behind.** It is now counted from the sonar's ping
+  numbers, so pings that were dropped still count. Before, it showed the rate of pings processed, which read low
+  whenever datagrams were dropped.
 
 ## 2026-11-13
 

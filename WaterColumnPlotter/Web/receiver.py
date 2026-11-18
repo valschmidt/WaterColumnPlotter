@@ -60,8 +60,12 @@ def reassemble(parts, lead_size):
     return bytes(dgm)
 
 
-def run(bind_ip, port, multicast_group, out_queue, rcvbuf=8 * 2 ** 20):
-    """Process entry point. Puts complete #MWC datagrams (bytes) and ('stats', dict) tuples on out_queue."""
+def run(bind_ip, port, multicast_group, out_queue, stats_queue, rcvbuf=8 * 2 ** 20):
+    """
+    Process entry point. Puts complete datagrams (bytes) on out_queue for the worker, and its counts, as
+    {'type': 'receiver', 'stats': dict}, on stats_queue every STATS_INTERVAL_S. The counts go straight to the server
+    rather than behind the datagrams, so they stay current when the worker falls behind and out_queue is full.
+    """
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s %(levelname)s: %(message)s')
     try:
         sock = open_socket(bind_ip, port, multicast_group, rcvbuf)
@@ -69,13 +73,17 @@ def run(bind_ip, port, multicast_group, out_queue, rcvbuf=8 * 2 ** 20):
         # Reported on the page; replay still works, and the address can be changed there.
         where = f"{bind_ip}:{port}" + (f" multicast {multicast_group}" if multicast_group else "")
         logger.error("Can't receive UDP on %s: %s", where, e)
-        out_queue.put(('stats', {'error': f"Can't receive UDP on {where}: {e.strerror or e}"}))
+        stats_queue.put({'type': 'receiver', 'stats': {'error': f"Can't receive UDP on {where}: {e.strerror or e}"}})
         return
     km = kmall()
     pending = {}  # key -> [arrival time, parts list]
     # behind: complete datagrams dropped because the worker's queue was full (processing can't keep up).
     # datagrams: complete #MWC; mrz: complete #MRZ.
-    stats = {'packets': 0, 'datagrams': 0, 'mrz': 0, 'discarded': 0, 'behind': 0}
+    # rate_hz: complete #MWC a second since the last report; idle_s: seconds since the last one (None before the
+    # first). Both are measured here, on the receiver's own clock, so the pages needn't time the counts' arrival.
+    stats = {'packets': 0, 'datagrams': 0, 'mrz': 0, 'discarded': 0, 'behind': 0, 'rate_hz': 0.0, 'idle_s': None}
+    last_mwc = None  # when the last complete #MWC was received
+    reported = (time.monotonic(), 0)  # time and #MWC count of the last report
 
     def forward(item):
         # The queue is bounded, so a worker that falls behind doesn't fill memory with datagrams waiting to be
@@ -83,8 +91,7 @@ def run(bind_ip, port, multicast_group, out_queue, rcvbuf=8 * 2 ** 20):
         try:
             out_queue.put_nowait(item)
         except queue.Full:
-            if not isinstance(item, tuple):
-                stats['behind'] += 1
+            stats['behind'] += 1
     next_stats = time.monotonic() + STATS_INTERVAL_S
 
     while True:
@@ -106,6 +113,8 @@ def run(bind_ip, port, multicast_group, out_queue, rcvbuf=8 * 2 ** 20):
             if partition['numOfDgms'] == 1:
                 forward(data)
                 stats[count] += 1
+                if count == 'datagrams':
+                    last_mwc = now
             else:
                 # Partitions of one datagram share the header's type, system, sounder and time fields.
                 key = (data[4:8], header['systemID'], header['echoSounderID'], data[12:20])
@@ -118,6 +127,8 @@ def run(bind_ip, port, multicast_group, out_queue, rcvbuf=8 * 2 ** 20):
                         lead_size += km.read_EMdgmMbody()['numBytesCmnPart']
                     forward(reassemble(entry[1], lead_size))
                     stats[count] += 1
+                    if count == 'datagrams':
+                        last_mwc = now
 
         # Drop datagrams whose partitions did not all arrive.
         for key in [k for k, (t, _) in pending.items() if now - t > INCOMPLETE_TIMEOUT_S]:
@@ -125,5 +136,8 @@ def run(bind_ip, port, multicast_group, out_queue, rcvbuf=8 * 2 ** 20):
             stats['discarded'] += 1
 
         if now >= next_stats:
-            forward(('stats', dict(stats)))
+            stats['rate_hz'] = (stats['datagrams'] - reported[1]) / (now - reported[0])
+            stats['idle_s'] = None if last_mwc is None else now - last_mwc
+            reported = (now, stats['datagrams'])
+            stats_queue.put({'type': 'receiver', 'stats': dict(stats)})
             next_stats = now + STATS_INTERVAL_S

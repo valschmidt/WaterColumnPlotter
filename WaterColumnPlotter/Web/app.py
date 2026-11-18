@@ -198,6 +198,7 @@ class Server:
         self.source_config = {'udpIp': args.udp_ip, 'udpPort': args.udp_port, 'multicast': args.multicast or '',
                               'dataDir': str(Path(args.data_dir).resolve())}
         self.stats = {}
+        self.receiver_stats = {}  # the receiver's latest counts (and any error), sent with the worker's
         self.clients = set()
         self.dialog_open = False  # the native Open dialog is showing
 
@@ -216,7 +217,8 @@ class Server:
     def new_receiver(self):
         c = self.source_config
         return self.ctx.Process(target=receiver.run, name='receiver', daemon=True,
-                                args=(c['udpIp'], c['udpPort'], c['multicast'] or None, self.dg_queue))
+                                args=(c['udpIp'], c['udpPort'], c['multicast'] or None, self.dg_queue,
+                                      self.result_queue))
 
     # ----- Messages to browsers -----
 
@@ -295,8 +297,10 @@ class Server:
                 if msg['transducerDepth_m'] != self.settings['transducerDepth_m']:
                     logger.info("Transducer depth from installation datagram: %.3f m", msg['transducerDepth_m'])
                     await self.change_settings({'transducerDepth_m': msg['transducerDepth_m']})
+            elif msg['type'] == 'receiver':
+                self.receiver_stats = msg['stats']
             elif msg['type'] == 'update':
-                self.stats = msg['stats']
+                self.stats = {**self.receiver_stats, **msg['stats']}
                 for seq, record in msg['geo']:
                     self.geo[seq] = record
                     self.geo_bytes += georef.record_bytes(record)
@@ -465,10 +469,7 @@ class Server:
             old = self.receiver
             old.terminate()
             await asyncio.to_thread(old.join, 2)
-            try:
-                self.dg_queue.put_nowait(('stats', {}))  # forget the old receiver's counts (and any error)
-            except queue.Full:
-                pass
+            self.receiver_stats = {}  # forget the old receiver's counts (and any error)
             self.receiver = self.new_receiver()
             self.receiver.start()
         await self.broadcast(self.source_message())

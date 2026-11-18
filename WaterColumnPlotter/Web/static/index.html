@@ -19,7 +19,7 @@
         <option value="layers">Layers</option>
         <option value="thermocline" selected>Thermocline</option>
       </select></label>
-    <label class="check" title="Keep each plot's color scale at the 10th to 90th percentile of its data. Adjusting a scale by hand turns this off."><input type="checkbox" id="autolevels" checked> Auto levels</label>
+    <label class="check" title="Keep each plot's color scale between percentiles of its data: the 2nd and 98th unless changed in Settings, Display. Adjusting a scale by hand turns this off."><input type="checkbox" id="autolevels" checked> Auto levels</label>
     <button id="wreck-toggle" type="button" aria-pressed="false" aria-controls="wreck-bar" title="Experimental: find the shallowest water column return on a target, such as a wreck's mast, inside a box you draw on the plots, and compare it with the sonar's own bottom detections. This view is yours only.">Wreck</button>
     <button id="settings-toggle" type="button" aria-expanded="false" aria-controls="settings">Settings</button>
     <span id="status" class="status">Connecting…</span>
@@ -101,7 +101,7 @@
 
   <div id="wreck-bar" class="bar" hidden title="Experimental wreck detection, yours only. Depths are the plotter's: straight rays at the sound speed at the transducer, heave-corrected, measured below the transducer (or the surface); not corrected for refraction, water level or datum. A field estimate, not a charted depth.">
     <span class="source-label">Wreck (experimental):</span>
-    <button id="wreck-clear" type="button" title="Remove the box and its detections, to start over. Turning Wreck off does too.">Clear box</button>
+    <button id="wreck-clear" type="button" title="Remove the box and its detections, to start over. Esc, or turning Wreck off, does too.">Clear box</button>
     <span id="wreck-help" class="wreck-help"></span>
     <label title="In each column of the box (one swath, one across-track cell), the shallowest cell at or above this level is a detection (pink). The largest dot, ringed in white, is the shallowest. Point at a detection on a plot for its depth and position.">Threshold
       <input id="wreck-threshold" type="number" step="0.5"> <span class="unit">dB</span></label>
@@ -188,6 +188,12 @@
             <option value="max">Max</option>
             <option value="decimate">Decimate</option>
           </select></label>
+        <label title="With Auto levels on, the pie's color scale runs from the first percentile of its data to the second. Lower the first to see weaker signals; raise the second for fewer saturated cells. Kept in this browser.">Pie auto levels
+          <input id="autolevels-pie-lo" class="percent" type="number" step="any" min="0" max="100" aria-label="Pie auto levels, low percentile"> to
+          <input id="autolevels-pie-hi" class="percent" type="number" step="any" min="0" max="100" aria-label="Pie auto levels, high percentile"> <span class="unit">%</span></label>
+        <label title="With Auto levels on, the horizontal and vertical slices' color scales run from the first percentile of their data to the second. Kept in this browser.">Slice auto levels
+          <input id="autolevels-slices-lo" class="percent" type="number" step="any" min="0" max="100" aria-label="Slice auto levels, low percentile"> to
+          <input id="autolevels-slices-hi" class="percent" type="number" step="any" min="0" max="100" aria-label="Slice auto levels, high percentile"> <span class="unit">%</span></label>
       </fieldset>
       <button type="submit" title="Applies to everyone viewing this plotter. Changing the cell size, depth reference, along-track average, swaths or sidelobe suppression clears the history.">Apply</button>
     </div>

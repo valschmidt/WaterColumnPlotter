@@ -45,7 +45,7 @@ const SLICE_H_COLOR = 'rgba(255, 170, 60, 0.9)';   // horizontal slice band (dep
 const SLICE_V_COLOR = 'rgba(80, 220, 255, 0.9)';   // vertical slice band (across-track)
 const WRECK_DOT = '#ff3fd0';                         // wreck detections
 const WRECK_BOX = 'rgb(160, 110, 240)';      // the wreck box (prism): violet, apart from the white pie time line
-const BOTTOM_DOT = 'rgba(200, 205, 215, 0.75)';     // the sonar's bottom detections under the wreck box
+const BOTTOM_DOT = '#3ee05a';                       // the sonar's bottom detections (soundings) in the wreck box
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -87,6 +87,22 @@ function saveSlices() {
   try { localStorage.setItem(SLICES_KEY, JSON.stringify(state.slices)); } catch (e) { /* not kept */ }
 }
 state.slices = loadSlices();
+
+// Auto levels: the color scale spans these percentiles (%) of a plot's data, for the pie and for both slices; set in
+// Settings, Display, and kept in this browser. Water column levels have a long tail of strong echoes (seafloor,
+// targets): on EM 2040 data the 90th to 98th percentile is 15 to 25 dB, the 10th to 2nd about 3 to 9 dB.
+const AUTO_LEVELS_DEFAULT = { pie: [2, 98], slices: [2, 98] };
+const AUTO_LEVELS_KEY = 'wcp.autoLevels';
+function loadAutoLevels() {
+  const ok = r => Array.isArray(r) && r.length === 2 && r.every(Number.isFinite) && r[0] >= 0 && r[0] < r[1] && r[1] <= 100;
+  try {
+    const s = JSON.parse(localStorage.getItem(AUTO_LEVELS_KEY));
+    return { pie: ok(s?.pie) ? s.pie : AUTO_LEVELS_DEFAULT.pie, slices: ok(s?.slices) ? s.slices : AUTO_LEVELS_DEFAULT.slices };
+  } catch (e) {
+    return { ...AUTO_LEVELS_DEFAULT };
+  }
+}
+const autoLevelPercentiles = loadAutoLevels();
 
 function percentiles(data, lo, hi) {
   // Percentiles of the finite values, from a sample of at most ~50k values.
@@ -211,6 +227,13 @@ window.addEventListener('keydown', ev => {
   if ((k === 'h' || k === 'v') && !isTyping(ev) && !ev.ctrlKey && !ev.metaKey && !ev.altKey) zoomAxisKeys.add(k);
 });
 window.addEventListener('keyup', ev => zoomAxisKeys.delete(ev.key.toLowerCase()));
+// Esc in wreck mode removes the box (and any being drawn), to start over. Not while a dialog is open: Esc closes it.
+window.addEventListener('keydown', ev => {
+  if (ev.key !== 'Escape' || !state.wreck.on || isTyping(ev) || document.querySelector('dialog[open]')) return;
+  for (const panel of Object.values(panels)) panel.rubber = null;
+  clearWreck();
+  wreckChanged();
+});
 window.addEventListener('blur', () => zoomAxisKeys.clear());
 
 class Panel {
@@ -312,11 +335,13 @@ class Panel {
     this.draw();
   }
 
-  // Set the color scale to the 10th to 90th percentile of the data. With smooth, move only part of the way there,
-  // so continuous auto levels don't make the colors jump from one update to the next.
+  // Set the color scale to the auto levels percentiles of the data (autoLevelPercentiles: the pie's, or the slices').
+  // With smooth, move only part of the way there, so continuous auto levels don't make the colors jump from one
+  // update to the next.
   autoLevels(redraw = true, smooth = false) {
     if (!this.image) return;
-    const p = percentiles(this.image.data, 0.10, 0.90);
+    const [lo, hi] = autoLevelPercentiles[this.el.id === 'pie' ? 'pie' : 'slices'];
+    const p = percentiles(this.image.data, lo / 100, hi / 100);
     if (!p) return;
     if (smooth && this.levels) {
       const k = 0.3;
@@ -441,9 +466,10 @@ class Panel {
         handleDrag = { ...hit, start: h.axis === 'x' ? wx : wy, lo: h.lo, hi: h.hi, at: h.at, wx0: wx, wy0: wy };
         return;
       }
-      // Wreck mode: a drag on the plot draws a box (shift-drag still pans).
+      // Wreck mode, until the box is complete: a drag on the plot draws a box (shift-drag still pans). Once it is
+      // complete, a drag outside it pans as usual, so the box isn't redrawn by accident; Esc removes it to start over.
       const p = this.plot;
-      if (this.drawBox && state.wreck.on && !ev.shiftKey && ev.offsetX >= p.x && ev.offsetX <= p.x + p.w && ev.offsetY >= p.y &&
+      if (this.drawBox && wreckSelecting() && !ev.shiftKey && ev.offsetX >= p.x && ev.offsetX <= p.x + p.w && ev.offsetY >= p.y &&
           ev.offsetY <= p.y + p.h) {
         this.rubber = { x0: ev.offsetX, y0: ev.offsetY, x1: ev.offsetX, y1: ev.offsetY };
         return;
@@ -542,6 +568,7 @@ class Panel {
     // While a wreck box is being set up, only its own edges and lines can be grabbed: the slice bands and pie time
     // stay put, so a drag draws the box.
     const selecting = wreckSelecting();
+    let insideBox = null;  // inside a box: moves it, unless a slice line or band edge there is grabbed instead
     for (const h of this.handles()) {
       if (selecting && h.kind !== 'box') continue;
       if (h.kind === 'box') {
@@ -553,7 +580,7 @@ class Panel {
         if (Math.min(dx0, dx1) <= tol) part += dx0 <= dx1 ? 'x0' : 'x1';
         if (Math.min(dy0, dy1) <= tol) part += dy0 <= dy1 ? 'y0' : 'y1';
         if (part) return { handle: h, part };
-        if (x1 - x0 > 2 * tol && y1 - y0 > 2 * tol) return { handle: h, part: 'move' };
+        if (x1 - x0 > 2 * tol && y1 - y0 > 2 * tol && !insideBox) insideBox = { handle: h, part: 'move' };
         continue;
       }
       const pos = v => (h.axis === 'x' ? this.toScreen(v, 0)[0] : this.toScreen(0, v)[1]);
@@ -572,7 +599,7 @@ class Panel {
         if (toEdge <= 6) return { handle: h, part: edge };
       }
     }
-    return null;
+    return insideBox;
   }
 
   // ----- Histogram and color-level editor, to the right of the plot -----
@@ -1164,19 +1191,27 @@ function drawWreck(ctx, panel) {
   if (last === null) return;
   // The pie shows every swath's detections in the box, those of the swaths it shows bright, the others faint.
   const inPie = d => id !== 'pie' || (sh && d.seq >= sh.seq0 && d.seq <= sh.seq1);
-  const dots = (list, color, size) => {
+  // outline: a dark square behind each dot, so it shows on any color of the plot (green on viridis, say).
+  const dots = (list, color, size, outline = false) => {
     for (const faint of id === 'pie' ? [true, false] : [false]) {
       ctx.globalAlpha = faint ? 0.3 : 1;
-      ctx.fillStyle = color;
       for (const d of list) {
         if (inPie(d) === faint) continue;
         const [x, y] = wreckScreen(panel, d);
+        if (outline) {
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+          ctx.fillRect(x - size / 2 - 1, y - size / 2 - 1, size + 2, size + 2);
+        }
+        ctx.fillStyle = color;
         ctx.fillRect(x - size / 2, y - size / 2, size, size);
       }
     }
     ctx.globalAlpha = 1;
   };
-  dots(w.bottoms, BOTTOM_DOT, 3);
+  // The sonar's soundings, under the detections and a little larger, so a sounding at a detection shows as a green
+  // edge round it: whether the threshold finds the target shallower or deeper than the sonar did. On the horizontal
+  // slice (seen from above), only those within the box's depths: those deeper, the seafloor, would cover the box.
+  dots(id === 'horizontal' ? w.bottoms.filter(d => d.depth <= w.depth[1]) : w.bottoms, BOTTOM_DOT, 5, true);
   // Detections: small squares, as there can be thousands; the shallowest a large dot ringed in white.
   dots(w.detections, WRECK_DOT, 3);
   if (w.least) {
@@ -1368,7 +1403,7 @@ function showWreck() {
   if (!w.seq) missing.push('time');
   if (!w.depth) missing.push('depth');
   if (!w.across) missing.push('across-track');
-  wreckEl.help.textContent = !missing.length ? ''
+  wreckEl.help.textContent = !missing.length ? 'Drag the box or its edges to adjust it, elsewhere to pan · Esc: new box'
     : w.seq || w.depth || w.across ? `Drag the violet line out to set ${missing.join(' and ')}`
     : 'Drag a box around the target on any plot';
   wreckEl.exportButton.disabled = !w.detections.length;
@@ -1394,7 +1429,7 @@ function showWreck() {
   }
   wreckEl.result.textContent = text;
   wreckEl.result.title = `${full}\n\nWC shallowest: the shallowest detection, at its cell's centre (the cell's ` +
-    "extent in brackets). Sonar bottom detections in box: the shallowest of the sonar's own bottom detections (gray) " +
+    "extent in brackets). Sonar bottom detections in box: the shallowest of the sonar's own bottom detections (green) " +
     "in the box's swaths and across-track, at or below its top, in the same frame. The difference shows how much " +
     'shoaler the water column is than the bathymetry. On flat seafloor the threshold finds the leading edge of the ' +
     'echo, a little above the bottom detections: check it there first.';
@@ -1961,6 +1996,22 @@ function setAutoLevels(on) {
 }
 autoLevelsBox.addEventListener('change', () => setAutoLevels(autoLevelsBox.checked));
 
+// Auto levels percentiles (Settings, Display): applied at once to the plots they're for, if auto levels is on.
+for (const [which, ids] of [['pie', ['pie']], ['slices', ['horizontal', 'vertical']]]) {
+  const inputs = ['lo', 'hi'].map(end => document.getElementById(`autolevels-${which}-${end}`));
+  inputs.forEach((input, i) => { input.value = autoLevelPercentiles[which][i]; });
+  const apply = () => {
+    const r = inputs.map(input => Number(input.value));
+    const ok = inputs.every(input => input.value !== '') && r[0] >= 0 && r[0] < r[1] && r[1] <= 100;
+    inputs.forEach(input => input.classList.toggle('invalid', !ok));
+    if (!ok) return;
+    autoLevelPercentiles[which] = r;
+    try { localStorage.setItem(AUTO_LEVELS_KEY, JSON.stringify(autoLevelPercentiles)); } catch (e) { /* not kept */ }
+    if (state.autoLevels) for (const id of ids) panels[id].autoLevels();
+  };
+  for (const input of inputs) input.addEventListener('input', apply);
+}
+
 const settingsForm = document.getElementById('settings');
 const settingsToggle = document.getElementById('settings-toggle');
 settingsToggle.addEventListener('click', () => {
@@ -2245,7 +2296,7 @@ function markDirty(form) {
 }
 function settingsChanged() {
   // Number fields only: the checkbox and menus apply at once.
-  return [...settingsForm.querySelectorAll('input[type="number"]')].some(input =>
+  return [...settingsForm.querySelectorAll('input[type="number"][name]')].some(input =>
     input.value !== '' && Number(input.value) !== state.settings[input.name]);
 }
 settingsForm.addEventListener('input', () => markDirty(settingsForm));
@@ -2259,27 +2310,42 @@ aboutDialog.addEventListener('click', ev => { if (ev.target === aboutDialog) abo
 // Status line
 // ---------------------------------------------------------------------------
 const statusEl = document.getElementById('status');
+// Shown on hovering over the status line (which may be cut short to fit), after the full line.
+const STATUS_HELP = [
+  'PR: the sonar\'s ping rate, from its ping numbers (the recorded rate when replaying).',
+  'dgms/s: water column datagrams a second, received live or processed from the file.',
+  'rcvd: water column datagrams received since the plotter started.',
+  'dropped … behind: complete datagrams dropped because processing couldn\'t keep up.',
+  'dropped … incomplete: datagrams dropped because some of their UDP packets never arrived.',
+  'ms/dgm: time to process one datagram (recent average).',
+  'swaths: how many the page holds for the plots, and their size.',
+].join('\n');
 let lastStats = null;
+// Real-time: no water column datagram for this long (s) shows as "no data arriving".
+const NO_DATA_S = 3;
 function showStats(stats) {
   showWreckGeo(stats);
   const now = performance.now();
-  // Rate of datagrams received live, or processed from the file being replayed.
+  // Rate of datagrams received live (measured by the receiver, on its own clock), or processed from the file being
+  // replayed.
   const replaying = source.mode === 'replay';
   const count = replaying ? stats.processed ?? 0 : stats.datagrams ?? 0;
   let rate = '';
-  if (lastStats && lastStats.replaying === replaying && count >= lastStats.count) {
-    rate = `${((count - lastStats.count) / ((now - lastStats.at) / 1000)).toFixed(1)} datagrams/s · `;
+  if (!replaying && stats.rate_hz != null) {
+    rate = `${stats.rate_hz.toFixed(1)} dgms/s · `;
+  } else if (replaying && lastStats && lastStats.replaying && count >= lastStats.count) {
+    rate = `${((count - lastStats.count) / ((now - lastStats.at) / 1000)).toFixed(1)} dgms/s · `;
   }
   // Swaths skipped since the last update because the cell size is too small for the swath, and datagrams dropped
   // because processing couldn't keep up with them.
   const tooLarge = lastStats ? (stats.grid_too_large ?? 0) - lastStats.tooLarge : 0;
   const behind = lastStats ? (stats.behind ?? 0) - lastStats.behind : 0;
   if (!replaying) {
-    // Whether real-time data is arriving, next to the source.
-    const perSec = lastStats && !lastStats.replaying && count >= lastStats.count
-      ? (count - lastStats.count) / ((now - lastStats.at) / 1000) : null;
-    sourceEl.state.textContent = stats.error ? '' : perSec ? `receiving ${perSec.toFixed(1)} datagrams/s` : 'no data arriving';
-    sourceEl.state.classList.toggle('ok', !stats.error && perSec > 0);
+    // Whether real-time data is arriving, next to the source: a datagram within the last NO_DATA_S seconds.
+    const arriving = stats.idle_s != null && stats.idle_s < NO_DATA_S;
+    sourceEl.state.textContent = stats.error ? '' : arriving ? `receiving ${(stats.rate_hz ?? 0).toFixed(1)} dgms/s`
+      : 'no data arriving';
+    sourceEl.state.classList.toggle('ok', !stats.error && arriving);
     if (stats.error) sourceEl.error.textContent = stats.error;
     else if (sourceEl.error.textContent.startsWith("Can't receive UDP")) sourceEl.error.textContent = '';
   }
@@ -2287,16 +2353,17 @@ function showStats(stats) {
   if (stats.ping_rate_hz) {
     const only = state.settings && state.settings.dualSwath !== 'both' ? ` (${state.settings.dualSwath} shown)` : '';
     const swaths = stats.swaths_per_ping > 1 ? ` × ${stats.swaths_per_ping} swaths${only}` : '';
-    rate = `${stats.ping_rate_hz.toFixed(1)} pings/s${swaths} · ` + rate;
+    rate = `PR: ${stats.ping_rate_hz.toFixed(1)} Hz${swaths} · ` + rate;
   }
   lastStats = { at: now, count, replaying, tooLarge: stats.grid_too_large ?? 0, behind: stats.behind ?? 0 };
   statusEl.classList.toggle('error', tooLarge > 0 || behind > 0);
-  statusEl.textContent = (tooLarge > 0 ? 'Cell size too small for this swath: swaths are being skipped · ' : '') +
-    (behind > 0 ? `Processing can't keep up: ${behind} datagrams dropped · ` : '') +
+  statusEl.textContent = statusEl.title = (tooLarge > 0 ? 'Cell too small: swaths skipped · ' : '') +
+    (behind > 0 ? 'Processing can\'t keep up · ' : '') +
     rate + (replaying ? `replaying · processed ${count}`
-      : `received ${count} · incomplete dropped ${stats.discarded ?? 0}`) +
-    ` · processing ${(stats.process_ms ?? 0).toFixed(0)} ms/datagram` +
-    ` · holding ${buffer.swaths.length} swaths (${(buffer.bytes / 1e6).toFixed(0)} MB${buffer.memoryLimited ? ', memory limit' : ''})`;
+      : `rcvd ${count} · dropped ${stats.behind ?? 0} behind, ${stats.discarded ?? 0} incomplete`) +
+    ` · ${(stats.process_ms ?? 0).toFixed(0)} ms/dgm` +
+    ` · ${buffer.swaths.length} swaths (${(buffer.bytes / 1e6).toFixed(0)} MB${buffer.memoryLimited ? ', memory limit' : ''})`;
+  statusEl.title += '\n\n' + STATUS_HELP;
 }
 
 // ---------------------------------------------------------------------------
