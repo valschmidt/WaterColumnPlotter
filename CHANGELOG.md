@@ -8,6 +8,10 @@ prototype, so changes are listed by date rather than version number.
 
 ## Unreleased
 
+Nothing yet.
+
+## 2026-11-18
+
 ### Changed
 - **Faster Kongsberg processing, so real-time data keeps up.** Water Column Plotter now needs pykmall 1.1.3, which
   reads water column samples as arrays instead of one number at a time, and the median sidelobe suppression options
